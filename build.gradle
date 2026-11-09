@@ -148,7 +148,8 @@ pitest {
     targetClasses = ['dev.erencivril.ledger.domain.*']
     targetTests = ['dev.erencivril.ledger.domain.*']
     threads = 2
+    mutators = ['STRONGER']
     outputFormats = ['HTML', 'XML']
     timestampedReports = false
-    mutationThreshold = 80
+    mutationThreshold = 90
 }
