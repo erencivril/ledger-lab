@@ -112,16 +112,21 @@ public final class TransferService {
             UUID sourceAccountId,
             UUID destinationAccountId,
             Money amount,
-            boolean stepUpConfirmed) {
+            boolean stepUpConfirmed, String payeeName) {
 
         public TransferCommand(String idempotencyKey, UUID sourceAccountId, UUID destinationAccountId, Money amount) {
-            this(idempotencyKey, sourceAccountId, destinationAccountId, amount, false);
+            this(idempotencyKey, sourceAccountId, destinationAccountId, amount, false, null);
         }
 
         /**
          * A hash of the request body. Two requests are "the same" when this matches, so the amount is
          * normalised first: 10 and 10.00 are the same request.
          */
+        public TransferCommand(String idempotencyKey, UUID sourceAccountId, UUID destinationAccountId, Money amount,
+                boolean stepUpConfirmed) {
+            this(idempotencyKey, sourceAccountId, destinationAccountId, amount, stepUpConfirmed, null);
+        }
+
         String fingerprint() {
             String canonical = sourceAccountId + "|" + destinationAccountId + "|" + amount.amount().toPlainString()
                     + "|" + amount.currency();

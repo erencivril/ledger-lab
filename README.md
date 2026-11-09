@@ -120,13 +120,17 @@ Before money moves, `RiskEngine` looks at the payment and answers `ALLOW`, `WARN
 | `HOLD` | The sender is debited, the money sits in a hold account, the transfer is `PENDING` and the answer is `202`. `POST /transfers/{id}/release` pays the payee, `.../reject` refunds the sender. |
 | `BLOCK` | `403 blocked_by_risk`. Nothing moved. |
 
-The rules of the first rule set (`src/main/resources/risk/ruleset-v1.yaml`):
+The baseline rules of the first rule set (`src/main/resources/risk/ruleset-v1.yaml`):
 
 | Rule | Fires when |
 |---|---|
 | `FIRST_PAYMENT_LARGE` | the sender has never completed a payment to this payee and the amount is at least 1,000 USD |
 | `AMOUNT_DEVIATION` | the amount is at least 5 times the sender's average payment, with at least 3 earlier payments |
 | `NEW_PAYEE_ACCOUNT` | the payee account is under 72 hours old and the amount is at least 300 USD |
+
+Version 2 adds `NAME_NO_MATCH` (STEP_UP), `MOCK_SANCTIONS` (BLOCK), and `VELOCITY_1H` / `VELOCITY_24H` (HOLD). Windows count attempted payments and sum their USD amounts, including the current attempt, atomically in Redis. The boundaries are `(now - window, now]` using the Redis clock. The limits are 10 attempts or 10,000 USD in 1h, and 30 attempts or 25,000 USD in 24h. An unavailable velocity store always produces `HOLD` with `VELOCITY_UNAVAILABLE`, even if a rule is disabled. The older per-minute HTTP throttle is separate.
+
+Optional `payeeName` is compared with the account owner's name after Unicode NFKD normalisation, accent removal, case folding and punctuation/space cleanup. Equal names are MATCH, a normalised Levenshtein similarity of at least 0.8 is CLOSE, otherwise NO_MATCH. This is a local VoP-style example, not a connection to a verification network. Missing names are NOT_PROVIDED and not a mismatch. It does not handle every script, transliteration or confusable character. The mock sanctions list contains only `Example Restricted Person` and `Synthetic Blocked Entity`, checks the actual owner rather than the supplied name, and is not a real screening service.
 
 Rules live in YAML, are loaded into PostgreSQL as a numbered version, and a published version cannot change: the application compares the stored hash with the file and refuses to start if they differ. Every decision is written to `risk_decisions` with the version and the rules that fired, and those tables reject UPDATE and DELETE. Decisions are made before the transfer transaction, so a payment that lands in between is not seen. See [ADR 0008](docs/adr/0008-risk-engine-in-the-domain.md) and, for the hold, [ADR 0009](docs/adr/0009-holds-use-a-hold-account.md).
 
@@ -141,7 +145,7 @@ Amounts are strings. Errors are always `{"code": "...", "message": "..."}`.
 | `POST /accounts` | Body: `owner`, `currency`, optional `initialBalance`. Returns `201`. An opening balance is paid by the treasury through a normal journal. |
 | `GET /accounts/{id}` | Account with its balance. |
 | `GET /accounts/{id}/statement?limit=20&cursor=...` | Journal entries, newest first. `limit` is 1 to 100. Pass `nextCursor` back as `cursor` for the next page; it is `null` on the last page. Each entry has the amount and the balance after it. |
-| `POST /transfers` | Header `Idempotency-Key`. Body: `sourceAccountId`, `destinationAccountId`, `amount`, `currency` (the source account's currency), optional `stepUpConfirmed`. `201` when completed, `202` when the risk checks hold it. |
+| `POST /transfers` | Header `Idempotency-Key`. Body: `sourceAccountId`, `destinationAccountId`, `amount`, `currency` (the source account's currency), optional `payeeName` and `stepUpConfirmed`. `201` when completed, `202` when the risk checks hold it. |
 | `GET /transfers/{id}` | One transfer, including the amount on each side, the FX rate used, its status and the risk decision. |
 | `POST /transfers/{id}/release` | Finishes a held transfer: the payee is paid. `409 transfer_not_pending` if it was already decided. |
 | `POST /transfers/{id}/reject` | Cancels a held transfer: the sender is refunded. |

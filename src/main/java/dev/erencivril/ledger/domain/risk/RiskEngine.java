@@ -34,6 +34,9 @@ public final class RiskEngine {
 
     public RiskDecision assess(RiskContext context) {
         List<RuleHit> hits = new ArrayList<>();
+        if (!context.velocity().available()) {
+            hits.add(new RuleHit("VELOCITY_UNAVAILABLE", RiskAction.HOLD, "velocity store unavailable; manual review required"));
+        }
         for (Rule rule : rules) {
             rule.evaluate(context).ifPresent(hits::add);
         }

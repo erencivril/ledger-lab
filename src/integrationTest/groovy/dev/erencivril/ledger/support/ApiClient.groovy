@@ -26,6 +26,7 @@ class ApiClient implements Closeable {
     ApiClient(Map overrides = [:]) {
         def env = [
                 PORT                    : '0',
+                RISK_ENABLED            : 'false',
                 DATABASE_URL            : Infra.jdbcUrl(),
                 DATABASE_USER           : Infra.POSTGRES.username,
                 DATABASE_PASSWORD       : Infra.POSTGRES.password,

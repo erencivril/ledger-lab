@@ -8,6 +8,7 @@ import dev.erencivril.ledger.domain.Transfer;
 import dev.erencivril.ledger.domain.TransferStatus;
 import dev.erencivril.ledger.domain.risk.RiskDecision;
 import dev.erencivril.ledger.domain.risk.RuleSet;
+import dev.erencivril.ledger.domain.risk.VelocitySnapshot;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -149,6 +150,12 @@ public final class Ports {
 
         /** Does nothing if the version exists already. */
         void insertIfAbsent(RuleSet ruleSet, String contentSha256);
+    }
+
+    /** A best-effort signal store, never a money store. Unavailable means HOLD, not a zero count. */
+    public interface RiskVelocity {
+        VelocitySnapshot record(UUID senderId, BigDecimal amountUsd);
+        static RiskVelocity empty() { return (sender, amount) -> VelocitySnapshot.empty(); }
     }
 
     /** An account together with the version it had when it was read. */

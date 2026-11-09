@@ -115,7 +115,7 @@ public final class LedgerRoutes {
         boolean stepUpConfirmed = Json.optionalBoolean(body, "stepUpConfirmed");
 
         TransferService.TransferResult result =
-                transfers.transfer(new TransferCommand(key, source, destination, amount, stepUpConfirmed));
+                transfers.transfer(new TransferCommand(key, source, destination, amount, stepUpConfirmed, Json.optionalText(body, "payeeName")));
         // 202: the request was understood and the money has left the sender, but the payee is not paid yet.
         boolean held = result.transfer().status() == TransferStatus.PENDING;
         res.status(result.replayed() ? 200 : held ? 202 : 201);

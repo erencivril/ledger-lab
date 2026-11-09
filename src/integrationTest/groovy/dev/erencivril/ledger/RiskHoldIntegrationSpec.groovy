@@ -322,7 +322,7 @@ rules:
         ledger.sql.firstRow('select count(*) c from risk_decisions where source_account_id = ?', [a.id()]).c == 0
     }
 
-    def "crash between the hold and the release: the money waits in the hold account and a restarted process can finish the job"() {
+    def "crash between the hold and the release: the money waits in the hold account and a restarted process can finish the transfer"() {
         given:
         def a = ledger.openAccount(USD, '1000.00')
         def b = ledger.openAccount(USD, '0')
@@ -446,8 +446,8 @@ rules:
         def loader = new RuleSetLoader(ledger.unitOfWork)
 
         expect:
-        loader.loadBundled() == [1]
-        loader.loadBundled() == [1]
+        loader.loadBundled() == [1, 2]
+        loader.loadBundled() == [1, 2]
         loader.engineFor(1).ruleSetVersion() == 1
 
         when:

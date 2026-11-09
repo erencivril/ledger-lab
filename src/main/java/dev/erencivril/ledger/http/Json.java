@@ -80,6 +80,15 @@ final class Json {
         return node == null || node.isNull() ? null : decimal(node, field);
     }
 
+    static String optionalText(JsonNode body, String field) {
+        JsonNode node = body.get(field);
+        if (node == null || node.isNull()) return null;
+        if (!node.isTextual() || node.asText().length() > 200) {
+            throw new BadRequest("invalid_field", "'" + field + "' must be text of at most 200 characters");
+        }
+        return node.asText();
+    }
+
     static boolean optionalBoolean(JsonNode body, String field) {
         JsonNode node = body.get(field);
         if (node == null || node.isNull()) {

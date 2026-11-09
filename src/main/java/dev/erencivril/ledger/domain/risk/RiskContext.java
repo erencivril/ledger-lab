@@ -24,7 +24,16 @@ public record RiskContext(
         Duration payeeAccountAge,
         int senderHistoryCount,
         BigDecimal senderAverageUsd,
-        boolean stepUpConfirmed) {
+        boolean stepUpConfirmed,
+        NameMatcher.Result nameCheck,
+        boolean sanctioned,
+        VelocitySnapshot velocity) {
+
+    public RiskContext(Money amount, BigDecimal amountUsd, boolean firstPaymentToPayee,
+            Duration payeeAccountAge, int senderHistoryCount, BigDecimal senderAverageUsd, boolean stepUpConfirmed) {
+        this(amount, amountUsd, firstPaymentToPayee, payeeAccountAge, senderHistoryCount, senderAverageUsd,
+                stepUpConfirmed, new NameMatcher.Result(NameMatcher.Grade.NOT_PROVIDED, 0), false, VelocitySnapshot.empty());
+    }
 
     public RiskContext {
         Objects.requireNonNull(amount, "amount");

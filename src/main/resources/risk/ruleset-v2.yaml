@@ -1,0 +1,33 @@
+version: 2
+description: Adds velocity, name comparison and an invented sanctions list.
+stack:
+  warnings: 0
+  stepUps: 0
+rules:
+  # A large first payment is held for a person to look at.
+  - id: FIRST_PAYMENT_LARGE
+    action: HOLD
+    params:
+      minAmountUsd: 1000
+  # A payment much bigger than the sender's usual one needs a second confirmation.
+  - id: AMOUNT_DEVIATION
+    action: STEP_UP
+    params:
+      factor: 5
+      minHistory: 3
+  # A payee account opened in the last 3 days is only a warning on its own.
+  - id: NEW_PAYEE_ACCOUNT
+    action: WARN
+    params:
+      maxAgeHours: 72
+      minAmountUsd: 300
+  - id: NAME_NO_MATCH
+    action: STEP_UP
+  - id: MOCK_SANCTIONS
+    action: BLOCK
+  - id: VELOCITY_1H
+    action: HOLD
+    params: {maxCount: 10, maxAmountUsd: 10000}
+  - id: VELOCITY_24H
+    action: HOLD
+    params: {maxCount: 30, maxAmountUsd: 25000}

@@ -20,7 +20,7 @@ Use the ledger hold pattern. There is one `HOLD` account per currency. Placing a
 ## Consequences
 
 - The ledger audit passes at every moment, including while transfers wait. A crash between the hold and the decision loses nothing: the money is in the hold account and the `PENDING` row says whose it is.
-- Nothing releases or rejects a hold by itself. There is no timeout, no expiry job and no authorisation on the endpoints (the project has no authentication at all). A real service would need all three.
+- Nothing releases or rejects a hold by itself. There is no timeout, no expiry worker and no authorisation on the endpoints (the project has no authentication at all). A real service would need all three.
 - The sender cannot spend money that is on hold, which is the intent.
 
 ## Evidence

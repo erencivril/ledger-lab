@@ -26,7 +26,7 @@ public final class RuleSetLoader {
     private static final Logger log = LoggerFactory.getLogger(RuleSetLoader.class);
 
     /** The bundled files, oldest first. Adding a version means adding a file and a line here. */
-    static final List<String> BUNDLED = List.of("risk/ruleset-v1.yaml");
+    static final List<String> BUNDLED = List.of("risk/ruleset-v1.yaml", "risk/ruleset-v2.yaml");
 
     private final UnitOfWork unitOfWork;
 

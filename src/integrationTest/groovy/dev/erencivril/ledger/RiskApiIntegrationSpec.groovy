@@ -9,7 +9,7 @@ class RiskApiIntegrationSpec extends Specification {
 
     @Shared ApiClient api
 
-    def setupSpec() { api = new ApiClient() }
+    def setupSpec() { api = new ApiClient([RISK_ENABLED: 'true', RISK_RULESET_VERSION: '1']) }
     def cleanupSpec() { api.close() }
 
     String newKey() { "api-risk-${UUID.randomUUID()}".toString() }

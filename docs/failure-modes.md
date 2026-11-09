@@ -26,6 +26,8 @@ Each row says what goes wrong, what the system does, what the client sees, and w
 | A published rule set file is edited | The stored hash differs from the file. | The application refuses to start. Nothing is decided with rules nobody can trace. | Same file: \"a published rule set version cannot be changed\" |
 | Risk audit tampering | An UPDATE or DELETE on a decision, a hit or a rule set. | The database rejects it (`restrict_violation`). | Same file: \"the audit tables refuse updates and deletes\" |
 
+| Redis down during risk assessment | The sliding-window count and amount cannot be read. The risk engine never treats this as zero. | `202 PENDING` with `VELOCITY_UNAVAILABLE`, money parked in the hold account. A replay still deduplicates via PostgreSQL. With the older per-minute throttle set fail-closed, it can instead refuse earlier with 503. | [`RiskSignalsIntegrationSpec`](../src/integrationTest/groovy/dev/erencivril/ledger/RiskSignalsIntegrationSpec.groovy): "risk enabled with Redis down parks money rather than paying unchecked" |
+
 ## What is not covered
 
 - A crash of PostgreSQL itself after it acknowledged a commit but before the disk write is PostgreSQL's durability guarantee (`fsync`, WAL). The specs do not test PostgreSQL's own recovery.

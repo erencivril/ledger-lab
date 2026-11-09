@@ -12,6 +12,7 @@ import dev.erencivril.ledger.cache.RedisClients;
 import dev.erencivril.ledger.cache.RedisHealthProbe;
 import dev.erencivril.ledger.cache.RedisIdempotencyCache;
 import dev.erencivril.ledger.cache.RedisVelocityLimiter;
+import dev.erencivril.ledger.cache.RedisRiskVelocity;
 import dev.erencivril.ledger.domain.FxRateTable;
 import dev.erencivril.ledger.domain.HoldAccounts;
 import dev.erencivril.ledger.domain.TransferPlanner;
@@ -61,7 +62,7 @@ public final class App implements AutoCloseable {
         Clock clock = Clock.systemUTC();
         FxRateTable rates = unitOfWork.execute(tx -> new FxRateTable(tx.fxRates().findAll()));
 
-        RiskAssessor risk = riskAssessor(config, unitOfWork, rates, clock);
+        RiskAssessor risk = riskAssessor(config, unitOfWork, rates, clock, redis);
         HoldService holds = new HoldService(unitOfWork, planner, clock);
 
         AccountService accounts = new AccountService(unitOfWork, planner, clock);
@@ -97,7 +98,7 @@ public final class App implements AutoCloseable {
     }
 
     /** Loads the bundled rule sets into the database and builds the engine for the configured version. */
-    private static RiskAssessor riskAssessor(Config config, JooqUnitOfWork unitOfWork, FxRateTable rates, Clock clock) {
+    private static RiskAssessor riskAssessor(Config config, JooqUnitOfWork unitOfWork, FxRateTable rates, Clock clock, JedisPooled redis) {
         if (!config.riskEnabled()) {
             return RiskAssessor.disabled();
         }
@@ -106,7 +107,7 @@ public final class App implements AutoCloseable {
         int version = config.riskRuleSetVersion() != null
                 ? config.riskRuleSetVersion()
                 : versions.get(versions.size() - 1);
-        return new LedgerRiskAssessor(unitOfWork, loader.engineFor(version), rates, clock);
+        return new LedgerRiskAssessor(unitOfWork, loader.engineFor(version), rates, clock, new RedisRiskVelocity(redis));
     }
 
     public int port() {

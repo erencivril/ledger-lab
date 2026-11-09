@@ -8,6 +8,9 @@ import dev.erencivril.ledger.domain.FxRateTable;
 import dev.erencivril.ledger.domain.Money;
 import dev.erencivril.ledger.domain.risk.RiskContext;
 import dev.erencivril.ledger.domain.risk.RiskEngine;
+import dev.erencivril.ledger.domain.risk.NameMatcher;
+import dev.erencivril.ledger.domain.risk.MockSanctions;
+import dev.erencivril.ledger.application.Ports.RiskVelocity;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
@@ -27,12 +30,18 @@ public final class LedgerRiskAssessor implements RiskAssessor {
     private final RiskEngine engine;
     private final FxRateTable rates;
     private final Clock clock;
+    private final RiskVelocity velocity;
 
     public LedgerRiskAssessor(UnitOfWork unitOfWork, RiskEngine engine, FxRateTable rates, Clock clock) {
+        this(unitOfWork, engine, rates, clock, RiskVelocity.empty());
+    }
+
+    public LedgerRiskAssessor(UnitOfWork unitOfWork, RiskEngine engine, FxRateTable rates, Clock clock, RiskVelocity velocity) {
         this.unitOfWork = unitOfWork;
         this.engine = engine;
         this.rates = rates;
         this.clock = clock;
+        this.velocity = velocity;
     }
 
     @Override
@@ -57,7 +66,10 @@ public final class LedgerRiskAssessor implements RiskAssessor {
                     age.isNegative() ? Duration.ZERO : age,
                     history.count(),
                     averageUsd,
-                    command.stepUpConfirmed());
+                    command.stepUpConfirmed(),
+                    NameMatcher.check(command.payeeName(), payee.get().ownerName()),
+                    MockSanctions.contains(payee.get().ownerName()),
+                    velocity.record(command.sourceAccountId(), rates.toUsd(amount).amount()));
             return Optional.of(new RiskAssessment(context, engine.assess(context)));
         });
     }
