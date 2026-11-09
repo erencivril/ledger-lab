@@ -123,7 +123,7 @@ jobs:
       - name: Scan the image for known vulnerabilities (Trivy)
         # Fails the CI run on HIGH or CRITICAL findings that have a fix available. Findings without a fix are listed
         # in the log by the next step but do not block, because there is nothing to upgrade to.
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ledger-lab:ci
           format: table
@@ -132,7 +132,7 @@ jobs:
           exit-code: "1"
           vuln-type: os,library
       - name: List unfixed findings (information only)
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ledger-lab:ci
           format: table
