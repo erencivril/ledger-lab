@@ -36,4 +36,21 @@ class FxRateTableSpec extends Specification {
         def e = thrown(IllegalArgumentException)
         e.message.contains('USD')
     }
+
+    def "toUsd leaves USD alone, converts with the table and rounds to cents"() {
+        given:
+        def table = new FxRateTable([new FxRate(EUR, USD, new BigDecimal('1.08695652'))])
+
+        expect:
+        table.toUsd(new Money(new BigDecimal('12.34'), USD)) == new Money(new BigDecimal('12.34'), USD)
+        table.toUsd(new Money(new BigDecimal('100.00'), EUR)) == new Money(new BigDecimal('108.70'), USD)
+    }
+
+    def "toUsd fails with NoFxRate when the currency has no rate to USD"() {
+        when:
+        new FxRateTable([]).toUsd(new Money(new BigDecimal('1.00'), GBP))
+
+        then:
+        thrown(DomainException.NoFxRate)
+    }
 }

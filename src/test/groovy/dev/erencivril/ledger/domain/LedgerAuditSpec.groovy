@@ -213,4 +213,69 @@ class LedgerAuditSpec extends Specification {
         then: 'the transfer does not balance, balance_after disagrees, and the stored balance disagrees'
         problems.size() == 3
     }
+
+    // ---- hold accounts -------------------------------------------------------------------------
+
+    def hold = new AccountRow(UUID.randomUUID(), AccountKind.HOLD, null)
+
+    /** Alice holds 30.00 for a payment to Bob: the money moved from Alice to the hold account. */
+    def heldEntries() {
+        def deposit = UUID.randomUUID()
+        def held = UUID.randomUUID()
+        [
+                entry(1, deposit, treasury.id(), '-100.00'),
+                entry(2, deposit, alice, '100.00', '100.00'),
+                entry(3, held, alice, '-30.00', '70.00'),
+                entry(4, held, hold.id(), '30.00'),
+        ]
+    }
+
+    def "money in a hold account is clean when it equals the pending transfers of that currency"() {
+        expect:
+        LedgerAudit.violations([treasury, hold, customer(alice, '70.00')], heldEntries(), [(USD): new BigDecimal('30.00')]).isEmpty()
+        LedgerAudit.violations([treasury, hold, customer(alice, '70.00')], heldEntries(), [(USD): new BigDecimal('30')]).isEmpty()
+    }
+
+    def "money in a hold account that no pending transfer explains is reported"() {
+        when:
+        def problems = LedgerAudit.violations([treasury, hold, customer(alice, '70.00')], heldEntries(), pending)
+
+        then:
+        problems.size() == 1
+        problems[0].contains('30.00 USD')
+        problems[0].contains(expected)
+
+        where:
+        pending                          | expected
+        [:]                              | 'add up to 0 USD'
+        [(USD): new BigDecimal('20.00')] | 'add up to 20.00 USD'
+        [(USD): new BigDecimal('31.00')] | 'add up to 31.00 USD'
+    }
+
+    def "a pending transfer with nothing in the hold account is reported, per currency"() {
+        when:
+        def problems = LedgerAudit.violations(accounts(), cleanEntries(), [(EUR): new BigDecimal('5.00')])
+
+        then:
+        problems.size() == 1
+        problems[0].contains('hold accounts hold 0 EUR')
+        problems[0].contains('add up to 5.00 EUR')
+    }
+
+    def "a released hold leaves the hold account empty and the ledger clean"() {
+        given:
+        def entries = heldEntries()
+        def release = UUID.randomUUID()
+        entries << entry(5, release, hold.id(), '-30.00')
+        entries << entry(6, release, bob, '30.00', '30.00')
+
+        expect:
+        LedgerAudit.violations([treasury, hold, customer(alice, '70.00'), customer(bob, '30.00')], entries, [:]).isEmpty()
+    }
+
+    def "without pending amounts the two-argument form expects empty hold accounts"() {
+        expect:
+        LedgerAudit.violations([treasury, hold, customer(alice, '70.00')], heldEntries()).size() == 1
+        LedgerAudit.violations(accounts(), cleanEntries()).isEmpty()
+    }
 }

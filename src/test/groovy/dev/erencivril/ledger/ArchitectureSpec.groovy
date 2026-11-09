@@ -27,7 +27,7 @@ class ArchitectureSpec extends Specification {
         expect:
         noClasses().that().resideInAPackage('..ledger.application..')
                 .should().dependOnClassesThat()
-                .resideInAnyPackage('..ledger.persistence..', '..ledger.http..', '..ledger.cache..', 'org.jooq..', 'spark..', 'redis..', 'com.zaxxer..')
+                .resideInAnyPackage('..ledger.persistence..', '..ledger.http..', '..ledger.cache..', '..ledger.risk..', 'org.jooq..', 'spark..', 'redis..', 'com.zaxxer..')
                 .allowEmptyShould(true).check(classes)
     }
 

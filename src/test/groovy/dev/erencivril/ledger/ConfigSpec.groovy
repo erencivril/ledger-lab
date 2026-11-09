@@ -16,6 +16,8 @@ class ConfigSpec extends Specification {
         config.databaseConnectTimeoutMillis() == 10_000
         config.databasePoolSize() == 10
         config.velocityFailOpen()
+        config.riskEnabled()
+        config.riskRuleSetVersion() == null
     }
 
     def "every setting can be overridden from the environment"() {
@@ -56,5 +58,15 @@ class ConfigSpec extends Specification {
         then:
         def e = thrown(IllegalArgumentException)
         e.message.contains('TRANSFER_MAX_ATTEMPTS')
+    }
+
+    def "risk checks can be switched off and a rule set version can be pinned"() {
+        when:
+        def config = Config.fromEnv([RISK_ENABLED: 'false', RISK_RULESET_VERSION: '2'])
+
+        then:
+        !config.riskEnabled()
+        config.riskRuleSetVersion() == 2
+        Config.fromEnv([RISK_RULESET_VERSION: ' ']).riskRuleSetVersion() == null
     }
 }

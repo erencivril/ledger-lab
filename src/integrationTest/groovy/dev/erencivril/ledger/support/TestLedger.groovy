@@ -2,6 +2,12 @@ package dev.erencivril.ledger.support
 
 import com.zaxxer.hikari.HikariDataSource
 import dev.erencivril.ledger.application.AccountService
+import dev.erencivril.ledger.application.HoldService
+import dev.erencivril.ledger.application.LedgerRiskAssessor
+import dev.erencivril.ledger.application.RiskAssessor
+import dev.erencivril.ledger.domain.HoldAccounts
+import dev.erencivril.ledger.risk.RuleSetLoader
+import dev.erencivril.ledger.risk.RuleSetYaml
 import dev.erencivril.ledger.application.LockStrategyKind
 import dev.erencivril.ledger.application.Ports
 import dev.erencivril.ledger.application.RetryPolicy
@@ -29,7 +35,12 @@ class TestLedger implements Closeable {
     TransferPlanner planner
     AccountService accounts
     TransferService transfers
+    HoldService holds
     Sql sql
+    private final Ports.VelocityLimiter limiter
+    private final Ports.IdempotencyCache cache
+    private final LockStrategyKind strategyKind
+    private final RetryPolicy retryPolicy
 
     TestLedger(Ports.VelocityLimiter limiter = Ports.VelocityLimiter.unlimited(),
                Ports.IdempotencyCache cache = Ports.IdempotencyCache.none(),
@@ -40,13 +51,40 @@ class TestLedger implements Closeable {
         dataSource = Database.connect(postgres.jdbcUrl, postgres.username, postgres.password, poolSize)
         Database.migrate(dataSource)
         unitOfWork = new JooqUnitOfWork(dataSource)
+        this.limiter = limiter
+        this.cache = cache
+        this.strategyKind = strategy
+        this.retryPolicy = retryPolicy
         planner = unitOfWork.execute { tx ->
-            new TransferPlanner(new FxRateTable(tx.fxRates().findAll()), new TreasuryAccounts(tx.accounts().treasuryIds()))
+            new TransferPlanner(new FxRateTable(tx.fxRates().findAll()), new TreasuryAccounts(tx.accounts().treasuryIds()),
+                    new HoldAccounts(tx.accounts().holdIds()))
         }
         accounts = new AccountService(unitOfWork, planner, Clock.systemUTC())
-        transfers = new TransferService(
-                unitOfWork, strategy.create(planner), limiter, cache, Clock.systemUTC(), retryPolicy, Ports.Pause.sleeping())
+        holds = new HoldService(unitOfWork, planner, Clock.systemUTC())
+        transfers = buildTransfers(RiskAssessor.disabled())
         sql = new Sql(dataSource)
+    }
+
+    private TransferService buildTransfers(RiskAssessor risk) {
+        new TransferService(unitOfWork, strategyKind.create(planner), limiter, cache, Clock.systemUTC(), retryPolicy,
+                Ports.Pause.sleeping(), risk, holds)
+    }
+
+    /**
+     * Turns the risk checks on with the rule set in the given YAML. It is stored in the database like a
+     * bundled one. A version number is only ever used with one text, because published versions are immutable.
+     */
+    void enableRisk(String yaml) {
+        def parsed = RuleSetYaml.parse(yaml)
+        def loader = new RuleSetLoader(unitOfWork)
+        loader.publish(parsed, 'test')
+        def engine = loader.engineFor(parsed.ruleSet().version())
+        def rates = unitOfWork.execute { tx -> new FxRateTable(tx.fxRates().findAll()) }
+        transfers = buildTransfers(new LedgerRiskAssessor(unitOfWork, engine, rates, Clock.systemUTC()))
+    }
+
+    def holdBalance(Currency currency) {
+        sql.firstRow("select coalesce(sum(e.amount), 0) total from journal_entries e join accounts a on a.id = e.account_id where a.kind = 'HOLD' and a.currency = ?", [currency.name()]).total
     }
 
     def openAccount(Currency currency, String balance, String owner = 'test') {

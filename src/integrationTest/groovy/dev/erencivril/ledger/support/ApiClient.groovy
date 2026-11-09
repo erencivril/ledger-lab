@@ -53,8 +53,10 @@ class ApiClient implements Closeable {
         r.body.id
     }
 
-    Response transfer(String key, String from, String to, String amount, String currency = 'USD') {
-        post('/transfers', [sourceAccountId: from, destinationAccountId: to, amount: amount, currency: currency],
+    Response transfer(String key, String from, String to, String amount, String currency = 'USD', boolean stepUpConfirmed = false) {
+        def body = [sourceAccountId: from, destinationAccountId: to, amount: amount, currency: currency]
+        if (stepUpConfirmed) body.stepUpConfirmed = true
+        post('/transfers', body,
                 key == null ? [:] : ['Idempotency-Key': key])
     }
 

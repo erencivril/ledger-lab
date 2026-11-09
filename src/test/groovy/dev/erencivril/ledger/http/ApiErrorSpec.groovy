@@ -34,4 +34,36 @@ class ApiErrorSpec extends Specification {
         error.status() == 409
         error.retryAfterSeconds() == null
     }
+
+    def "a blocked payment is a 403 that carries the reason codes"() {
+        when:
+        def error = ApiError.from(new ApplicationException.TransferBlocked(['SANCTIONED_PAYEE']))
+
+        then:
+        error.status() == 403
+        error.code() == 'blocked_by_risk'
+        error.reasonCodes() == ['SANCTIONED_PAYEE']
+        error.retryAfterSeconds() == null
+    }
+
+    def "a payment that needs step-up is a 403 with its own code and the reason codes"() {
+        when:
+        def error = ApiError.from(new ApplicationException.StepUpRequired(['AMOUNT_DEVIATION']))
+
+        then:
+        error.status() == 403
+        error.code() == 'step_up_required'
+        error.reasonCodes() == ['AMOUNT_DEVIATION']
+    }
+
+    def "deciding a transfer twice is a 409"() {
+        when:
+        def error = ApiError.from(new dev.erencivril.ledger.domain.DomainException.TransferNotPending(
+                UUID.randomUUID(), dev.erencivril.ledger.domain.TransferStatus.COMPLETED))
+
+        then:
+        error.status() == 409
+        error.code() == 'transfer_not_pending'
+        error.reasonCodes() == null
+    }
 }
