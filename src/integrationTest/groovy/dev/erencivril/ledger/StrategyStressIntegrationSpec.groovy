@@ -42,8 +42,8 @@ class StrategyStressIntegrationSpec extends Specification {
         def pool = Executors.newFixedThreadPool(THREADS)
         def startGate = new CountDownLatch(1)
         try {
-            def futures = requests.collect { job ->
-                CompletableFuture.supplyAsync({ startGate.await(); outcomeOf(job) }, pool)
+            def futures = requests.collect { request ->
+                CompletableFuture.supplyAsync({ startGate.await(); outcomeOf(request) }, pool)
             }
             startGate.countDown()
             return futures.collect { it.get(180, java.util.concurrent.TimeUnit.SECONDS) }

@@ -2,6 +2,8 @@ package dev.erencivril.ledger;
 
 import com.zaxxer.hikari.HikariDataSource;
 import dev.erencivril.ledger.application.AccountService;
+import dev.erencivril.ledger.application.Ports.Pause;
+import dev.erencivril.ledger.application.RetryPolicy;
 import dev.erencivril.ledger.application.TransferService;
 import dev.erencivril.ledger.cache.RedisClients;
 import dev.erencivril.ledger.cache.RedisHealthProbe;
@@ -37,7 +39,10 @@ public final class App implements AutoCloseable {
 
     public static App start(Config config) {
         HikariDataSource dataSource = Database.connect(
-                config.databaseUrl(), config.databaseUser(), config.databasePassword(), config.databasePoolSize());
+                config.databaseUrl(), config.databaseUser(),
+                config.databasePassword(),
+                config.databasePoolSize(),
+                config.databaseConnectTimeoutMillis());
         Database.migrate(dataSource);
         JedisPooled redis = RedisClients.connect(config.redisUrl());
 
@@ -49,11 +54,13 @@ public final class App implements AutoCloseable {
         AccountService accounts = new AccountService(unitOfWork, planner, clock);
         TransferService transfers = new TransferService(
                 unitOfWork,
-                planner,
+                config.lockStrategy().create(planner),
                 new RedisVelocityLimiter(
                         redis, config.velocityMaxTransfers(), config.velocityWindowSeconds(), config.velocityFailOpen()),
                 new RedisIdempotencyCache(redis),
-                clock);
+                clock,
+                new RetryPolicy(config.transferMaxAttempts(), config.transferRetryBaseMillis()),
+                Pause.sleeping());
 
         Service http = Service.ignite().port(config.port()).threadPool(32, 4, 30_000);
         new LedgerRoutes(
@@ -64,8 +71,9 @@ public final class App implements AutoCloseable {
                 .register(http);
         http.awaitInitialization();
         log.info(
-                "ledger-lab listening on port {} (velocity limit {} transfers per {}s, fail-open={})",
+                "ledger-lab listening on port {} (lock strategy {}, velocity limit {} transfers per {}s, fail-open={})",
                 http.port(),
+                config.lockStrategy().name().toLowerCase(),
                 config.velocityMaxTransfers(),
                 config.velocityWindowSeconds(),
                 config.velocityFailOpen());

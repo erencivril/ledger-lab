@@ -3,6 +3,7 @@ package dev.erencivril.ledger.persistence;
 import static dev.erencivril.ledger.persistence.jooq.Tables.ACCOUNTS;
 
 import dev.erencivril.ledger.application.Ports.AccountRepository;
+import dev.erencivril.ledger.application.Ports.VersionedAccount;
 import dev.erencivril.ledger.domain.Account;
 import dev.erencivril.ledger.domain.AccountKind;
 import dev.erencivril.ledger.domain.Currency;
@@ -56,11 +57,55 @@ final class JooqAccountRepository implements AccountRepository {
     public void updateBalance(UUID id, Money balance) {
         int updated = dsl.update(ACCOUNTS)
                 .set(ACCOUNTS.BALANCE, balance.amount())
+                .set(ACCOUNTS.VERSION, ACCOUNTS.VERSION.plus(1L))
                 .where(ACCOUNTS.ID.eq(id))
                 .execute();
         if (updated != 1) {
             throw new IllegalStateException("Expected to update one account, updated " + updated);
         }
+    }
+
+    @Override
+    public Optional<VersionedAccount> findVersioned(UUID id) {
+        return dsl.selectFrom(ACCOUNTS)
+                .where(ACCOUNTS.ID.eq(id))
+                .and(ACCOUNTS.KIND.eq(AccountKind.CUSTOMER.name()))
+                .fetchOptional(row -> new VersionedAccount(toAccount(row), row.getVersion()));
+    }
+
+    @Override
+    public boolean updateBalanceIfVersion(UUID id, Money balance, long expectedVersion) {
+        int updated = dsl.update(ACCOUNTS)
+                .set(ACCOUNTS.BALANCE, balance.amount())
+                .set(ACCOUNTS.VERSION, ACCOUNTS.VERSION.plus(1L))
+                .where(ACCOUNTS.ID.eq(id))
+                .and(ACCOUNTS.VERSION.eq(expectedVersion))
+                .execute();
+        return updated == 1;
+    }
+
+    @Override
+    public Optional<Money> debitIfFunded(UUID id, Money amount) {
+        return dsl.update(ACCOUNTS)
+                .set(ACCOUNTS.BALANCE, ACCOUNTS.BALANCE.minus(amount.amount()))
+                .set(ACCOUNTS.VERSION, ACCOUNTS.VERSION.plus(1L))
+                .where(ACCOUNTS.ID.eq(id))
+                .and(ACCOUNTS.BALANCE.ge(amount.amount()))
+                .returning(ACCOUNTS.BALANCE)
+                .fetchOptional()
+                .map(row -> new Money(row.getBalance(), amount.currency()));
+    }
+
+    @Override
+    public Money credit(UUID id, Money amount) {
+        return dsl.update(ACCOUNTS)
+                .set(ACCOUNTS.BALANCE, ACCOUNTS.BALANCE.plus(amount.amount()))
+                .set(ACCOUNTS.VERSION, ACCOUNTS.VERSION.plus(1L))
+                .where(ACCOUNTS.ID.eq(id))
+                .returning(ACCOUNTS.BALANCE)
+                .fetchOptional()
+                .map(row -> new Money(row.getBalance(), amount.currency()))
+                .orElseThrow(() -> new IllegalStateException("Expected to credit one account, found none: " + id));
     }
 
     @Override

@@ -46,6 +46,24 @@ public final class Ports {
 
         void updateBalance(UUID id, Money balance);
 
+        /** Plain SELECT, no lock. For the optimistic strategy. */
+        Optional<VersionedAccount> findVersioned(UUID id);
+
+        /**
+         * UPDATE ... WHERE id = ? AND version = ?, which also adds one to the version. Returns false when no
+         * row matched, meaning somebody changed the account after it was read.
+         */
+        boolean updateBalanceIfVersion(UUID id, Money balance, long expectedVersion);
+
+        /**
+         * UPDATE ... SET balance = balance - ? WHERE id = ? AND balance >= ? RETURNING balance. Empty when
+         * the account holds less than the amount.
+         */
+        Optional<Money> debitIfFunded(UUID id, Money amount);
+
+        /** UPDATE ... SET balance = balance + ? WHERE id = ? RETURNING balance. Returns the new balance. */
+        Money credit(UUID id, Money amount);
+
         Map<Currency, UUID> treasuryIds();
     }
 
@@ -74,6 +92,9 @@ public final class Ports {
     public interface FxRateRepository {
         List<FxRate> findAll();
     }
+
+    /** An account together with the version it had when it was read. */
+    public record VersionedAccount(Account account, long version) {}
 
     public record NewJournalEntry(UUID accountId, Money amount, Money balanceAfter) {}
 
@@ -114,6 +135,22 @@ public final class Ports {
     }
 
     public record CachedKey(String fingerprint, UUID transferId) {}
+
+    /** Waits between two attempts of a transfer. A port so that tests can see the waits without sitting through them. */
+    public interface Pause {
+        void pause(long millis);
+
+        static Pause sleeping() {
+            return millis -> {
+                try {
+                    Thread.sleep(millis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while waiting to retry a transfer", e);
+                }
+            };
+        }
+    }
 
     public interface HealthProbe {
         boolean isUp();

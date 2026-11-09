@@ -1,33 +1,31 @@
 package dev.erencivril.ledger.application;
 
-import dev.erencivril.ledger.application.ApplicationException.AccountNotFound;
+import dev.erencivril.ledger.application.ApplicationException.ConcurrentUpdate;
 import dev.erencivril.ledger.application.ApplicationException.IdempotencyKeyReused;
 import dev.erencivril.ledger.application.Ports.CachedKey;
 import dev.erencivril.ledger.application.Ports.IdempotencyCache;
 import dev.erencivril.ledger.application.Ports.IdempotencyRecord;
 import dev.erencivril.ledger.application.Ports.LedgerTransaction;
 import dev.erencivril.ledger.application.Ports.NewJournalEntry;
+import dev.erencivril.ledger.application.Ports.Pause;
 import dev.erencivril.ledger.application.Ports.UnitOfWork;
 import dev.erencivril.ledger.application.Ports.VelocityLimiter;
-import dev.erencivril.ledger.domain.Account;
 import dev.erencivril.ledger.domain.Money;
 import dev.erencivril.ledger.domain.Transfer;
 import dev.erencivril.ledger.domain.TransferKind;
 import dev.erencivril.ledger.domain.TransferPlan;
-import dev.erencivril.ledger.domain.TransferPlanner;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.stream.Stream;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,30 +37,47 @@ import org.slf4j.LoggerFactory;
  *   <li>Look for an earlier result for the key (Redis first, then Postgres). A replay returns early and
  *       does not use up velocity budget.
  *   <li>Check the velocity limit for the source account.
- *   <li>In one database transaction: claim the key, lock both accounts in id order, plan, write.
+ *   <li>In one database transaction: claim the key, change both balances (the {@link TransferStrategy}
+ *       decides how), write the transfer and the journal.
  * </ol>
+ *
+ * If the strategy reports a {@link ConcurrentUpdate}, the whole transaction, including the key claim, is
+ * rolled back and run again, up to the limit in the {@link RetryPolicy}. Only that exception is retried.
+ * A business rejection such as insufficient funds is final and is never retried.
  */
 public final class TransferService {
 
     private static final Logger log = LoggerFactory.getLogger(TransferService.class);
 
     private final UnitOfWork unitOfWork;
-    private final TransferPlanner planner;
+    private final TransferStrategy strategy;
     private final VelocityLimiter velocityLimiter;
     private final IdempotencyCache cache;
     private final Clock clock;
+    private final RetryPolicy retryPolicy;
+    private final Pause pause;
+    private final AtomicLong retries = new AtomicLong();
 
     public TransferService(
             UnitOfWork unitOfWork,
-            TransferPlanner planner,
+            TransferStrategy strategy,
             VelocityLimiter velocityLimiter,
             IdempotencyCache cache,
-            Clock clock) {
+            Clock clock,
+            RetryPolicy retryPolicy,
+            Pause pause) {
         this.unitOfWork = unitOfWork;
-        this.planner = planner;
+        this.strategy = strategy;
         this.velocityLimiter = velocityLimiter;
         this.cache = cache;
         this.clock = clock;
+        this.retryPolicy = retryPolicy;
+        this.pause = pause;
+    }
+
+    /** How many times an attempt was repeated because of a {@link ConcurrentUpdate}, since this service was created. */
+    public long retries() {
+        return retries.get();
     }
 
     public record TransferCommand(
@@ -97,9 +112,29 @@ public final class TransferService {
 
         velocityLimiter.acquire(command.sourceAccountId());
 
-        TransferResult result = unitOfWork.execute(tx -> executeInTransaction(tx, command, fingerprint));
+        TransferResult result = executeWithRetries(command, fingerprint);
         cache.put(command.idempotencyKey(), fingerprint, result.transfer().id());
         return result;
+    }
+
+    /**
+     * Runs the transfer transaction. When it loses a race it waits a random time and runs it again from
+     * the start; the failed attempt rolled back, so the next one sees a clean slate.
+     */
+    private TransferResult executeWithRetries(TransferCommand command, String fingerprint) {
+        int attempt = 1;
+        while (true) {
+            try {
+                return unitOfWork.execute(tx -> executeInTransaction(tx, command, fingerprint));
+            } catch (ConcurrentUpdate e) {
+                if (attempt >= retryPolicy.maxAttempts()) {
+                    throw e;
+                }
+                retries.incrementAndGet();
+                pause.pause(retryPolicy.jitterMillis(attempt, ThreadLocalRandom.current()));
+                attempt++;
+            }
+        }
     }
 
     public Transfer get(UUID id) {
@@ -131,62 +166,36 @@ public final class TransferService {
             return replayOf(tx, record, fingerprint);
         }
 
-        Map<UUID, Account> locked = lockInIdOrder(tx, command.sourceAccountId(), command.destinationAccountId());
-        Account source = requireFound(locked, command.sourceAccountId());
-        Account destination = requireFound(locked, command.destinationAccountId());
-
-        TransferPlan plan = planner.plan(source, destination, command.amount());
+        BalanceChange change = strategy.changeBalances(
+                tx, command.sourceAccountId(), command.destinationAccountId(), command.amount());
+        TransferPlan plan = change.plan();
 
         Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         Transfer transfer = new Transfer(
                 UUID.randomUUID(),
                 TransferKind.TRANSFER,
-                source.id(),
-                destination.id(),
+                command.sourceAccountId(),
+                command.destinationAccountId(),
                 plan.sourceAmount(),
                 plan.destinationAmount(),
                 plan.fxRate(),
                 now);
         tx.transfers().insert(transfer);
-        tx.accounts().updateBalance(source.id(), plan.sourceBalanceAfter());
-        tx.accounts().updateBalance(destination.id(), plan.destinationBalanceAfter());
 
         List<NewJournalEntry> entries = plan.journal().lines().stream()
-                .map(line -> new NewJournalEntry(
-                        line.accountId(), line.amount(), balanceAfter(line.accountId(), plan, source, destination)))
+                .map(line -> new NewJournalEntry(line.accountId(), line.amount(), balanceAfter(line.accountId(), command, change)))
                 .toList();
         tx.journal().append(transfer.id(), entries, now);
         tx.idempotency().attach(command.idempotencyKey(), transfer.id());
         return new TransferResult(transfer, false);
     }
 
-    /**
-     * Locks every involved account row with SELECT ... FOR UPDATE, always in ascending id order. Two
-     * transfers that touch the same accounts in opposite directions therefore queue on the same first
-     * row instead of each holding one lock and waiting for the other, which is how deadlocks happen.
-     */
-    private static Map<UUID, Account> lockInIdOrder(LedgerTransaction tx, UUID first, UUID second) {
-        Map<UUID, Account> locked = new HashMap<>();
-        Stream.of(first, second).distinct().sorted().forEach(id -> tx.accounts()
-                .findForUpdate(id)
-                .ifPresent(account -> locked.put(id, account)));
-        return locked;
-    }
-
-    private static Account requireFound(Map<UUID, Account> accounts, UUID id) {
-        Account account = accounts.get(id);
-        if (account == null) {
-            throw new AccountNotFound(id);
+    private static Money balanceAfter(UUID accountId, TransferCommand command, BalanceChange change) {
+        if (accountId.equals(command.sourceAccountId())) {
+            return change.sourceBalanceAfter();
         }
-        return account;
-    }
-
-    private static Money balanceAfter(UUID accountId, TransferPlan plan, Account source, Account destination) {
-        if (accountId.equals(source.id())) {
-            return plan.sourceBalanceAfter();
-        }
-        if (accountId.equals(destination.id())) {
-            return plan.destinationBalanceAfter();
+        if (accountId.equals(command.destinationAccountId())) {
+            return change.destinationBalanceAfter();
         }
         return null; // treasury accounts keep no stored balance
     }

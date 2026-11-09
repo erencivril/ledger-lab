@@ -1,4 +1,4 @@
-.PHONY: build test integration mutation check up down smoke
+.PHONY: build test integration mutation benchmark check up down smoke
 
 build:        ## compile and generate the jOOQ classes
 	./gradlew assemble
@@ -11,6 +11,9 @@ integration:  ## integration specs, starts PostgreSQL and Redis with Testcontain
 
 mutation:     ## PIT mutation testing on the domain package, report in build/reports/pitest
 	./gradlew pitest
+
+benchmark:   ## compare the three lock strategies (needs Docker, about 7 minutes), report in build/benchmark/report.md
+	./gradlew benchmark
 
 check:        ## unit + integration
 	./gradlew build

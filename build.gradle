@@ -11,7 +11,8 @@ version = '0.1.0'
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        // 21 by default. CI also builds and tests with -PjavaVersion=25.
+        languageVersion = JavaLanguageVersion.of((findProperty('javaVersion') ?: '21') as int)
     }
 }
 
@@ -36,10 +37,16 @@ ext {
 configurations {
     integrationTestImplementation.extendsFrom testImplementation
     integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+    benchmarkImplementation.extendsFrom implementation
+    benchmarkRuntimeOnly.extendsFrom runtimeOnly
 }
 
 sourceSets {
     integrationTest {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+    benchmark {
         compileClasspath += sourceSets.main.output
         runtimeClasspath += sourceSets.main.output
     }
@@ -71,6 +78,9 @@ dependencies {
 
     integrationTestImplementation "org.testcontainers:testcontainers:${testcontainersVersion}"
     integrationTestImplementation "org.testcontainers:testcontainers-postgresql:${testcontainersVersion}"
+
+    benchmarkImplementation "org.testcontainers:testcontainers:${testcontainersVersion}"
+    benchmarkImplementation "org.testcontainers:testcontainers-postgresql:${testcontainersVersion}"
 }
 
 jooq {
@@ -139,6 +149,19 @@ tasks.register('integrationTest', Test) {
     testLogging.showStandardStreams = true
 }
 
+// The load runner behind docs/benchmarks.md. Needs Docker. Options: -Dbench.transfers=3000 -Dbench.threads=16
+// -Dbench.runs=3 -Dbench.seed=20261110 (pass them with -PbenchArgs="-Dbench.runs=5" or edit the defaults in BenchmarkMain).
+tasks.register('benchmark', JavaExec) {
+    description = 'Runs the three locking strategies against a normal and a hot-account workload and prints a Markdown report.'
+    group = 'verification'
+    classpath = sourceSets.benchmark.runtimeClasspath
+    mainClass = 'dev.erencivril.ledger.benchmark.BenchmarkMain'
+    maxHeapSize = '512m'
+    if (project.hasProperty('benchArgs')) {
+        jvmArgs project.property('benchArgs').toString().split(' ')
+    }
+}
+
 tasks.named('check') {
     dependsOn tasks.named('integrationTest')
 }
@@ -153,4 +176,7 @@ pitest {
     outputFormats = ['HTML', 'XML']
     timestampedReports = false
     mutationThreshold = 90
+    // Run the PIT worker on the same JDK that compiled the classes (21 by default, 25 with -PjavaVersion=25).
+    // Without this the worker would use the JDK that runs Gradle and could not load newer class files.
+    jvmPath = javaToolchains.launcherFor(java.toolchain).map { it.executablePath }
 }

@@ -2,7 +2,7 @@ package dev.erencivril.ledger.application;
 
 import java.util.UUID;
 
-/** Failures that are not domain rules: missing things, key reuse, rate limiting. */
+/** Failures that are not domain rules: missing things, key reuse, rate limiting, lost races, outages. */
 public abstract sealed class ApplicationException extends RuntimeException {
 
     private final String code;
@@ -50,6 +50,25 @@ public abstract sealed class ApplicationException extends RuntimeException {
 
         public long retryAfterSeconds() {
             return retryAfterSeconds;
+        }
+    }
+
+    /**
+     * A competing transfer got in the way: the optimistic version check failed, or PostgreSQL aborted
+     * the transaction because of a deadlock or a serialization failure. Nothing was written, and the
+     * same request can safely be tried again.
+     */
+    public static final class ConcurrentUpdate extends ApplicationException {
+        public ConcurrentUpdate(String message) {
+            super("concurrent_update", message);
+        }
+    }
+
+    /** PostgreSQL cannot be reached. Nothing was written, and the same request can be tried again later. */
+    public static final class StorageUnavailable extends ApplicationException {
+        public StorageUnavailable(Throwable cause) {
+            super("storage_unavailable", "The database is not available right now");
+            initCause(cause);
         }
     }
 }

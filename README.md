@@ -4,7 +4,7 @@
 
 A small Java 21 service that moves money between accounts. Every transfer is recorded as a balanced double-entry journal, accounts can hold different currencies, and retries are safe.
 
-It is a learning project, built the way I would build a small payments service: money invariants first, then the API around them. The stack is Java 21, SparkJava, jOOQ, Flyway, PostgreSQL 16, Redis 7, HikariCP, Jackson, Spock and Testcontainers. It is the Java companion to [paywall-lab](https://github.com/erencivril/paywall-lab), which does a similar job in Go.
+It is a learning project, built the way I would build a small payments service: money invariants first, then the API around them, then evidence that the invariants hold under load and failure. The stack is Java 21, SparkJava, jOOQ, Flyway, PostgreSQL 16, Redis 7, HikariCP, Jackson, Spock and Testcontainers. It is the Java companion to [paywall-lab](https://github.com/erencivril/paywall-lab), which does a similar job in Go.
 
 ## Why
 
@@ -17,7 +17,14 @@ The interesting part of a transfer API is not the HTTP. It is a short list of fa
 5. A retried request does not move money twice.
 6. Two transfers that touch the same accounts at the same time do not deadlock or lose an update.
 
-The code and the tests are organised around these six facts.
+The code and the tests are organised around these six facts. `LedgerAudit` is the single definition of "the ledger is correct" (facts 2, 3 and the match between balances and journal); the stress tests and the benchmark both run it after the load stops.
+
+More detail lives in:
+
+- [docs/adr](docs/adr/README.md): the seven design decisions, with their evidence.
+- [docs/failure-modes.md](docs/failure-modes.md): what happens when something breaks, and which spec proves it.
+- [docs/isolation.md](docs/isolation.md): lost update, write skew and serialization retries, shown on PostgreSQL.
+- [docs/benchmarks.md](docs/benchmarks.md): the three lock strategies compared, with the hardware.
 
 ## Architecture
 
@@ -25,7 +32,8 @@ The code and the tests are organised around these six facts.
 flowchart LR
     C[client] --> R[http: SparkJava routes]
     R --> S[application: TransferService, AccountService]
-    S --> D[domain: Money, TransferPlanner, Journal]
+    S --> L[TransferStrategy: pessimistic / optimistic / atomic]
+    S --> D[domain: Money, TransferPlanner, Journal, LedgerAudit]
     S --> P[persistence: jOOQ repositories]
     S --> X[cache: Redis limiter + idempotency cache]
     P --> PG[(PostgreSQL)]
@@ -35,7 +43,7 @@ flowchart LR
 | Package | Role | Allowed to depend on |
 |---|---|---|
 | `domain` | Money, currencies, FX conversion, accounts, the journal, `TransferPlanner`. Plain Java. | JDK only |
-| `application` | `TransferService`, `AccountService`, and the interfaces (`Ports`) they need from the outside. | domain |
+| `application` | `TransferService` (with its retry loop), `AccountService`, the three `TransferStrategy` implementations, and the interfaces (`Ports`) they need from the outside. | domain |
 | `persistence` | jOOQ repositories, the transaction wrapper, Flyway and the connection pool. | domain, application |
 | `cache` | Redis velocity limit and idempotency cache. | domain, application |
 | `http` | SparkJava routes, JSON, error mapping. | domain, application |
@@ -58,13 +66,29 @@ The rate that was used is stored on the transfer row. The FX table is seeded by 
 
 Customer accounts keep a `balance` column next to the journal, with `CHECK (balance >= 0)`. That is a deliberate duplicate of what the entries add up to. The integration tests check that the two always agree.
 
-### Lock ordering
+### Locking: three strategies, one default
 
-`TransferService` runs one database transaction per transfer. Inside it, it locks both accounts with `SELECT ... FOR UPDATE`, always in ascending id order, regardless of which one is the sender. Then it reads the balances, asks the planner for a decision, and writes.
+`TransferService` runs one database transaction per transfer. Inside it a `TransferStrategy` changes the two balances safely; everything else (idempotency claim, transfer row, journal) is the same for all of them. Choose with `LOCK_STRATEGY`:
 
-If two transfers between A and B ran in opposite directions and each locked its own sender first, one would hold A and wait for B while the other held B and waited for A. PostgreSQL would eventually notice and abort one of them. With a fixed order both transfers queue on the same first row, so the cycle cannot form. Reading the balances after taking the locks is what prevents two concurrent debits from both seeing the same money.
+| `LOCK_STRATEGY` | How | Retries |
+|---|---|---|
+| `pessimistic` (default) | `SELECT ... FOR UPDATE` on both rows, then read, decide, write | never needed |
+| `optimistic` | plain `SELECT`, then `UPDATE ... WHERE version = ?`; a lost race rolls back and the whole transfer is run again | yes, up to `TRANSFER_MAX_ATTEMPTS` with jitter |
+| `atomic` | `UPDATE ... SET balance = balance - ? WHERE balance >= ?`: the database checks and changes in one statement | never needed |
 
-I checked this by removing the `sorted()` call once: 381 of 400 concurrent transfers failed with `deadlock detected` and the run took 85 seconds instead of 6. There is also a control test in the suite that locks two rows in opposite orders on purpose and asserts that PostgreSQL reports `40P01`. It shows the concurrency test would notice a bad ordering.
+All three touch the two rows in ascending id order, whichever one is the sender. If two transfers between A and B ran in opposite directions and each locked its own sender first, one would hold A and wait for B while the other held B and waited for A. With a fixed order both queue on the same first row, so the cycle cannot form. I checked this once by removing the `sorted()` call: 381 of 400 concurrent transfers failed with `deadlock detected`. A control test locks two rows in opposite orders on purpose and asserts that PostgreSQL reports `40P01`, so the concurrency tests would notice a bad ordering.
+
+Pessimistic stays the default because its behaviour does not depend on the workload: a conflict means waiting, never failing. The optimistic strategy matches it on spread-out traffic and falls apart on a hot account. See [ADR 0003](docs/adr/0003-lock-strategy.md) and the measurements in [docs/benchmarks.md](docs/benchmarks.md):
+
+| 3,000 transfers, 16 threads, median of 3 runs | pessimistic | optimistic | atomic |
+|---|---:|---:|---:|
+| 200 accounts, random pairs: committed per second | 208 | 227 | 229 |
+| 80% of transfers on one account: committed per second | 161 | 86 | 173 |
+| same, transfers that gave up after 5 attempts | 0 | 1,329 | 0 |
+
+A 2-vCPU shared VPS running the load generator, the application and PostgreSQL together: it compares the strategies and says nothing about capacity. Differences of about 10% are inside the spread between runs.
+
+When a transfer loses a race five times in a row, the client gets `409 concurrent_update` with `Retry-After`. Nothing moved, and repeating the request with the same key is safe. PostgreSQL's own deadlock (`40P01`) and serialization (`40001`) aborts are mapped to the same retryable error.
 
 ### Idempotency
 
@@ -82,7 +106,7 @@ A consequence worth knowing: a transfer that is rejected (insufficient funds, un
 
 Redis does two jobs and neither affects correctness.
 
-1. **Velocity limit.** A sliding window per source account, kept in a sorted set and updated by one Lua script so the check and the update are atomic across app instances. The script uses the Redis clock. The default is 10 transfers per 60 seconds, set with `VELOCITY_MAX_TRANSFERS` and `VELOCITY_WINDOW_SECONDS`. The next one gets `429` with code `velocity_limit_exceeded` and a `Retry-After` header. The limit counts attempts that get past the idempotency lookup, so a replay of a finished transfer is free, but a transfer later rejected for insufficient funds still counts. If Redis is down the limiter lets the transfer through and logs a warning (`VELOCITY_FAIL_OPEN=false` makes it fail instead, as a 500). I chose fail-open because the ledger is correct without this rule; it is a risk control, not an integrity control.
+1. **Velocity limit.** A sliding window per source account, kept in a sorted set and updated by one Lua script so the check and the update are atomic across app instances. The script uses the Redis clock. The default is 10 transfers per 60 seconds, set with `VELOCITY_MAX_TRANSFERS` and `VELOCITY_WINDOW_SECONDS`. The next one gets `429` with code `velocity_limit_exceeded` and a `Retry-After` header. The limit counts attempts that get past the idempotency lookup, so a replay of a finished transfer is free, but a transfer later rejected for insufficient funds still counts. If Redis is down the limiter lets the transfer through and logs a warning (`VELOCITY_FAIL_OPEN=false` makes it refuse the transfer instead). I chose fail-open because the ledger is correct without this rule; it is a risk control, not an integrity control.
 2. **Idempotency cache.** After a transfer commits, `idem:<key>` is written with a 24 hour expiry so a replay can skip one query. A miss, a stale entry, garbage, or Redis being down all fall back to PostgreSQL. A cache entry is only used when its stored request hash matches the new request, and it only ever points at a transfer that is looked up in PostgreSQL. Nothing is ever created or moved because of what Redis says. Tests delete entries, poison them, and point the app at a Redis that is not there.
 
 ## API
@@ -104,10 +128,11 @@ Currencies: `USD`, `EUR`, `GBP`, `TRY`, `JPY`, `KWD`. Codes are case-sensitive.
 |---|---|---|
 | 400 | Malformed or invalid input | `invalid_json`, `missing_field`, `invalid_field`, `invalid_id`, `invalid_amount`, `unsupported_currency`, `invalid_owner`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_limit`, `invalid_cursor` |
 | 404 | Unknown account, transfer or route | `account_not_found`, `transfer_not_found`, `route_not_found` |
-| 409 | Idempotency key reused with a different body | `idempotency_key_reused` |
+| 409 | Idempotency key reused with a different body, or a transfer that lost its race on every attempt (safe to repeat) | `idempotency_key_reused`, `concurrent_update` |
 | 422 | The request is well formed but a rule refuses it | `same_account`, `insufficient_funds`, `currency_mismatch`, `no_fx_rate` |
 | 429 | Velocity limit | `velocity_limit_exceeded` |
 | 500 | Anything unexpected | `internal_error` |
+| 503 | PostgreSQL cannot be reached (with `Retry-After`) | `storage_unavailable` |
 
 Amounts that are zero, negative or have too many decimals are 400 (`invalid_amount`). An amount above 1,000,000,000,000 is also `invalid_amount`.
 
@@ -146,6 +171,9 @@ Settings are environment variables:
 | `PORT` | `8080` |
 | `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD` | `jdbc:postgresql://localhost:5432/ledger`, `ledger`, `ledger` |
 | `DATABASE_POOL_SIZE` | `10` |
+| `DATABASE_CONNECT_TIMEOUT_MS` | `10000` (how long a request waits for a connection before it gets a 503) |
+| `LOCK_STRATEGY` | `pessimistic` (or `optimistic`, `atomic`) |
+| `TRANSFER_MAX_ATTEMPTS`, `TRANSFER_RETRY_BASE_MILLIS` | `5`, `5` |
 | `REDIS_URL` | `redis://localhost:6379` |
 | `VELOCITY_MAX_TRANSFERS` | `10` |
 | `VELOCITY_WINDOW_SECONDS` | `60` |
@@ -159,22 +187,22 @@ The schema is created by Flyway when the app starts. The jOOQ classes are genera
 make test         # unit specs, no Docker needed
 make integration  # starts PostgreSQL 16 and Redis 7 with Testcontainers
 make mutation     # PIT on the domain package
+make benchmark    # the three lock strategies compared (needs Docker, about 7 minutes)
 make check        # unit + integration
 ```
 
-**Unit specs (Spock 2 on Groovy 4).** 11 specs, 76 features, 191 test results with the `where:` rows counted. The domain is tested with data tables: rounding at 0, 2 and 3 decimals including the exact half-way cases, FX conversion, every validation rule, balanced and unbalanced journals. `TransferService` and `AccountService` are tested with mocked ports, including the order of calls and the lock order. An ArchUnit spec guards the layering.
+**Unit specs (Spock 2 on Groovy 4).** 274 test results. The domain is tested with data tables: rounding at 0, 2 and 3 decimals including the exact half-way cases, FX conversion, every validation rule, balanced and unbalanced journals, and every kind of damage `LedgerAudit` must notice. Each strategy and the retry loop are tested with mocked ports, including lock order and the waits between attempts. An ArchUnit spec guards the layering.
 
-**Integration specs.** 4 specs, 47 features, 73 test results, all against real PostgreSQL and Redis. They cover the repositories through the services, the whole HTTP API, idempotent replays, 20 parallel requests with one key (exactly one transfer), rollback of rejected transfers, the database-level guards (unbalanced journal, negative balance), the Redis limiter and its sliding window, 429 responses, and Redis being wrong, empty or unreachable. Every spec that writes money ends by running SQL that checks the invariants over the whole database: each transfer sums to zero per currency, each customer balance equals the sum of its entries, nothing is negative.
+**Integration specs.** 105 test results against real PostgreSQL and Redis. They cover the repositories through the services, the whole HTTP API, idempotent replays, 20 parallel requests with one key (exactly one transfer), rollback of rejected transfers, the database-level guards, the Redis limiter and Redis being wrong, empty or unreachable. Every spec that writes money ends by running the ledger audit over the whole database.
 
-**Concurrency test.** `ConcurrencyIntegrationSpec` starts 32 threads and fires 400 transfers of random amounts between the same two accounts, half in each direction, released together by a latch. The last local run:
+- **Stress, per strategy** (`StrategyStressIntegrationSpec`): randomized transfers across many accounts with a hot account on 32 threads; 400 transfers in both directions between two accounts; 300 requests of 1.00 against 100.00 (exactly 100 win). Each ends with the audit.
+- **Failure modes** (`FailureModesIntegrationSpec`, [docs/failure-modes.md](docs/failure-modes.md)): a crash mid-transfer, a lost response after commit, a deadlock, and PostgreSQL going down and coming back.
+- **Isolation** (`IsolationIntegrationSpec`, [docs/isolation.md](docs/isolation.md)): lost update at READ COMMITTED and its three fixes; write skew at REPEATABLE READ, stopped at SERIALIZABLE; a `40001` retry loop with jitter. Anomalies that need a particular order are produced with two hand-driven connections, not with sleeps.
+- **The checks can fail** (`InvariantSuiteHasTeethIntegrationSpec`): a deliberately wrong strategy loses an update, and the audit reports it.
 
-```
-transfers=400 threads=32 direction=both ok=400 deadlocks=0 elapsed_ms=5660 total_before=20000.00 total_after=20000.000
-```
+The original concurrency test still runs: 32 threads, 400 transfers in both directions between two accounts, 400 succeeded, no deadlocks, money conserved. Numbers are from a 2-vCPU VPS with PostgreSQL in Docker; read them as "it works under contention", not as a benchmark. For comparisons see [docs/benchmarks.md](docs/benchmarks.md), reproduced with `make benchmark`.
 
-All 400 succeeded and the money is conserved. The numbers are from a 2-vCPU VPS with PostgreSQL in Docker, so read them as "it works under contention", not as a benchmark. The same spec also runs 300 requests of 1.00 against an account with 100.00 (exactly 100 succeed, 200 get `insufficient_funds`, the balance ends at 0) and 200 cross-currency transfers in both directions.
-
-**Mutation testing (PIT).** PIT changes the domain code (flips a condition, removes a call, changes a return value) and checks that a test fails. It runs on `dev.erencivril.ledger.domain` with the `STRONGER` mutator set and the JUnit 5 plugin so Spock specs are run. Last run: 94 mutants, 94 killed, 100% line coverage of the mutated classes. The build fails below a 90% threshold, set in `build.gradle`. CI uploads the HTML report as an artifact and writes the score and any surviving mutants to the job summary.
+**Mutation testing (PIT).** PIT changes the domain code (flips a condition, removes a call, changes a return value) and checks that a test fails. It runs on `dev.erencivril.ledger.domain` with the `STRONGER` mutator set and the JUnit 5 plugin so Spock specs are run. Last run: 122 mutants, 122 killed, including `LedgerAudit` and the planner variant used by the atomic strategy. The build fails below a 90% threshold, set in `build.gradle`. CI uploads the HTML report as an artifact and writes the score and any surviving mutants to the run summary.
 
 On its first runs PIT reported two survivors. The treasury map's defensive copy was never tested, and the currency check in `TransferPlanner` was hidden behind a similar check inside `Money`, so a loose assertion on the error message let the mutant live. Both became tests.
 
@@ -182,12 +210,15 @@ PIT only looks at the domain. The application and persistence layers are checked
 
 ## CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs on every push to `main` and on pull requests:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on pull requests:
 
-1. `unit`: `./gradlew assemble test`.
-2. `integration`: `./gradlew integrationTest` with Testcontainers; prints the concurrency numbers in the job summary.
-3. `mutation`: `./gradlew pitest`; uploads the PIT report and writes the score to the summary.
-4. `docker`: `docker compose up --build --wait`, then `scripts/smoke.sh`.
+1. `unit`: `./gradlew assemble test`, on JDK 21 and JDK 25.
+2. `integration`: `./gradlew integrationTest` with Testcontainers, on JDK 21 and JDK 25; prints the stress and isolation numbers in the run summary.
+3. `mutation`: `./gradlew pitest`, on JDK 21 and JDK 25; uploads the PIT report and writes the score to the summary.
+4. `docker`: `docker compose up --build --wait`, then `scripts/smoke.sh`; then the built image is scanned with Trivy (HIGH and CRITICAL findings that have a fix fail the CI run; unfixed ones are listed but do not).
+5. `secrets`: gitleaks over the working tree and the whole history.
+
+The JDK 25 legs compile and run the project on 25; Gradle itself runs on 21.
 
 Gradle's build cache is off, so tests are never skipped as "from cache".
 
@@ -198,6 +229,8 @@ Gradle's build cache is off, so tests are never skipped as "from cache".
 - **No reversals.** There is no refund, cancel or hold. A transfer is final once committed.
 - **Idempotency keys are global and never expire.** They are not scoped to a client, and the table grows forever. A real service would scope keys per API client and delete old ones.
 - **Velocity limit is simple.** Per source account only, counts attempts, and fails open by default.
+- **SparkJava is unmaintained** (last release 2022). It is kept behind a thin routing layer with a named exit path, see [ADR 0006](docs/adr/0006-sparkjava-behind-a-thin-routing-layer.md); the image is scanned in CI.
+- **No outbox yet.** Anything that must follow a transfer (notifications, feeds) would use a transactional outbox, see [ADR 0007](docs/adr/0007-outbox-instead-of-saga.md). It is a decision, not code.
 - **Single PostgreSQL.** Row locks serialise transfers that share an account, which is the point, but a very busy account is a hot row. Scaling beyond one database would need partitioning by account and a different approach to cross-shard transfers (for example a saga or a transfer state machine), which this project does not have.
 - **The treasury is the counterparty for FX and opening balances** and is not reconciled against anything external.
 - **Operational basics are missing:** no metrics, no tracing, no request ids, no OpenAPI file, no graceful drain on shutdown beyond stopping Jetty.
