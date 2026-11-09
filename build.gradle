@@ -1,0 +1,154 @@
+plugins {
+    id 'java'
+    id 'groovy'
+    id 'application'
+    id 'nu.studer.jooq' version '10.1.1'
+    id 'info.solidsoft.pitest' version '1.15.0'
+}
+
+group = 'dev.erencivril'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    mainClass = 'dev.erencivril.ledger.Main'
+    applicationDefaultJvmArgs = ['-XX:MaxRAMPercentage=75']
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    jooqVersion = '3.20.20'
+    flywayVersion = '11.20.3'
+    jacksonVersion = '2.19.4'
+    spockVersion = '2.4-groovy-4.0'
+    groovyVersion = '4.0.33'
+    testcontainersVersion = '2.0.5'
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+sourceSets {
+    integrationTest {
+        groovy.srcDir 'src/integrationTest/groovy'
+        resources.srcDir 'src/integrationTest/resources'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+dependencies {
+    implementation "com.sparkjava:spark-core:2.9.4"
+    implementation "org.jooq:jooq:${jooqVersion}"
+    implementation "org.flywaydb:flyway-core:${flywayVersion}"
+    implementation "org.flywaydb:flyway-database-postgresql:${flywayVersion}"
+    implementation "org.postgresql:postgresql:42.7.14"
+    implementation "com.zaxxer:HikariCP:7.1.0"
+    implementation "redis.clients:jedis:5.2.0"
+    implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${jacksonVersion}"
+    implementation "org.slf4j:slf4j-api:2.0.20"
+    runtimeOnly "ch.qos.logback:logback-classic:1.5.38"
+
+    jooqGenerator "org.jooq:jooq-meta-extensions:${jooqVersion}"
+    jooqGenerator "org.slf4j:slf4j-simple:2.0.20"
+
+    testImplementation platform("org.apache.groovy:groovy-bom:${groovyVersion}")
+    testImplementation "org.apache.groovy:groovy"
+    testImplementation "org.spockframework:spock-core:${spockVersion}"
+    testImplementation "com.tngtech.archunit:archunit:1.5.1"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+
+    integrationTestImplementation "org.testcontainers:testcontainers:${testcontainersVersion}"
+    integrationTestImplementation "org.testcontainers:testcontainers-postgresql:${testcontainersVersion}"
+}
+
+jooq {
+    version = jooqVersion
+    edition = nu.studer.gradle.jooq.JooqEdition.OSS
+
+    configurations {
+        main {
+            // Generates the jOOQ classes from the Flyway migrations, so the
+            // build needs no running database.
+            generateSchemaSourceOnCompilation = true
+            generationTool {
+                logging = org.jooq.meta.jaxb.Logging.WARN
+                generator {
+                    name = 'org.jooq.codegen.JavaGenerator'
+                    database {
+                        name = 'org.jooq.meta.extensions.ddl.DDLDatabase'
+                        properties {
+                            property {
+                                key = 'scripts'
+                                value = 'src/main/resources/db/migration/*.sql'
+                            }
+                            property {
+                                key = 'sort'
+                                value = 'flyway'
+                            }
+                            property {
+                                key = 'defaultNameCase'
+                                value = 'lower'
+                            }
+                        }
+                    }
+                    generate {
+                        deprecated = false
+                        records = true
+                        immutablePojos = false
+                        fluentSetters = false
+                        javaTimeTypes = true
+                    }
+                    target {
+                        packageName = 'dev.erencivril.ledger.persistence.jooq'
+                        directory = "${buildDir}/generated-src/jooq/main"
+                    }
+                    strategy.name = 'org.jooq.codegen.DefaultGeneratorStrategy'
+                }
+            }
+        }
+    }
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    maxHeapSize = '512m'
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+    }
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs the integration specs against real PostgreSQL and Redis (Testcontainers).'
+    group = 'verification'
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+    classpath = sourceSets.integrationTest.runtimeClasspath
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest')
+}
+
+pitest {
+    pitestVersion = '1.30.2'
+    junit5PluginVersion = '1.2.3'
+    targetClasses = ['dev.erencivril.ledger.domain.*']
+    targetTests = ['dev.erencivril.ledger.domain.*']
+    threads = 2
+    outputFormats = ['HTML', 'XML']
+    timestampedReports = false
+    mutationThreshold = 80
+}
