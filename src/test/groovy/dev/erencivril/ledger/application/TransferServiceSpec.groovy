@@ -29,7 +29,9 @@ class TransferServiceSpec extends Specification {
     def limiter = Mock(VelocityLimiter)
     def cache = Mock(IdempotencyCache)
     def planner = new TransferPlanner(new FxRateTable([]), new TreasuryAccounts([(USD): UUID.randomUUID()]))
-    def service = new TransferService(unitOfWork, planner, limiter, cache, clock)
+    def pause = Mock(Pause)
+    def service = new TransferService(
+            unitOfWork, new PessimisticLockStrategy(planner), limiter, cache, clock, new RetryPolicy(3, 5), pause)
 
     def from = account('100.00')
     def to = account('0.00')
@@ -217,5 +219,90 @@ class TransferServiceSpec extends Specification {
         then:
         1 * transfers.find(stored.id()) >> Optional.empty()
         thrown(ApplicationException.TransferNotFound)
+    }
+
+    // ---- retries -------------------------------------------------------------------------------------------
+
+    def "a ConcurrentUpdate rolls back the attempt and the whole transaction is run again, claim included"() {
+        given:
+        def strategy = Mock(TransferStrategy)
+        def retrying = new TransferService(unitOfWork, strategy, limiter, cache, clock, new RetryPolicy(3, 5), pause)
+        def change = new BalanceChange(
+                planner.plan(from, to, usd('25.00')), usd('75.00'), usd('25.00'))
+        def attempts = 0
+
+        when:
+        def result = retrying.transfer(command)
+
+        then:
+        1 * cache.get(_) >> Optional.empty()
+        1 * idempotency.find(_) >> Optional.empty()
+        1 * limiter.acquire(from.id())
+        3 * idempotency.tryClaim('key-1', fingerprint) >> true
+        3 * strategy.changeBalances(tx, from.id(), to.id(), usd('25.00')) >> {
+            if (++attempts < 3) {
+                throw new ApplicationException.ConcurrentUpdate('lost the race')
+            }
+            change
+        }
+        2 * pause.pause({ it >= 0 && it <= 10 })
+        1 * transfers.insert(_)
+        1 * journal.append(_, _, _)
+        !result.replayed()
+        retrying.retries() == 2
+    }
+
+    def "after the last allowed attempt the ConcurrentUpdate reaches the caller and nothing is cached"() {
+        given:
+        def strategy = Mock(TransferStrategy)
+        def retrying = new TransferService(unitOfWork, strategy, limiter, cache, clock, new RetryPolicy(3, 5), pause)
+
+        when:
+        retrying.transfer(command)
+
+        then:
+        1 * cache.get(_) >> Optional.empty()
+        1 * idempotency.find(_) >> Optional.empty()
+        3 * idempotency.tryClaim(*_) >> true
+        3 * strategy.changeBalances(*_) >> { throw new ApplicationException.ConcurrentUpdate('lost the race') }
+        2 * pause.pause(_)
+        0 * cache.put(*_)
+        thrown(ApplicationException.ConcurrentUpdate)
+        retrying.retries() == 2
+    }
+
+    def "a business rejection is never retried"() {
+        given:
+        def strategy = Mock(TransferStrategy)
+        def retrying = new TransferService(unitOfWork, strategy, limiter, cache, clock, new RetryPolicy(3, 5), pause)
+
+        when:
+        retrying.transfer(command)
+
+        then:
+        1 * cache.get(_) >> Optional.empty()
+        1 * idempotency.find(_) >> Optional.empty()
+        1 * idempotency.tryClaim(*_) >> true
+        1 * strategy.changeBalances(*_) >> { throw new DomainException.InsufficientFunds(from.id(), usd('1.00'), usd('25.00')) }
+        0 * pause.pause(_)
+        thrown(DomainException.InsufficientFunds)
+        retrying.retries() == 0
+    }
+
+    def "a service with one attempt never retries"() {
+        given:
+        def strategy = Mock(TransferStrategy)
+        def single = new TransferService(unitOfWork, strategy, limiter, cache, clock, new RetryPolicy(1, 5), pause)
+
+        when:
+        single.transfer(command)
+
+        then:
+        1 * cache.get(_) >> Optional.empty()
+        1 * idempotency.find(_) >> Optional.empty()
+        1 * idempotency.tryClaim(*_) >> true
+        1 * strategy.changeBalances(*_) >> { throw new ApplicationException.ConcurrentUpdate('lost the race') }
+        0 * pause.pause(_)
+        thrown(ApplicationException.ConcurrentUpdate)
     }
 }

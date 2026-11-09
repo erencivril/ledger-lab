@@ -2,7 +2,9 @@ package dev.erencivril.ledger.support
 
 import com.zaxxer.hikari.HikariDataSource
 import dev.erencivril.ledger.application.AccountService
+import dev.erencivril.ledger.application.LockStrategyKind
 import dev.erencivril.ledger.application.Ports
+import dev.erencivril.ledger.application.RetryPolicy
 import dev.erencivril.ledger.application.TransferService
 import dev.erencivril.ledger.domain.Currency
 import dev.erencivril.ledger.domain.FxRateTable
@@ -11,30 +13,39 @@ import dev.erencivril.ledger.domain.TransferPlanner
 import dev.erencivril.ledger.domain.TreasuryAccounts
 import dev.erencivril.ledger.persistence.Database
 import dev.erencivril.ledger.persistence.JooqUnitOfWork
+import dev.erencivril.ledger.persistence.LedgerAuditReader
 import groovy.sql.Sql
 
 import java.time.Clock
 
-/** The real services wired against the Testcontainers Postgres, with the Redis parts pluggable. */
+/**
+ * The real services wired against the Testcontainers Postgres, with the Redis parts pluggable and the
+ * locking strategy chosen per instance. Retries wait for real but only a millisecond or so.
+ */
 class TestLedger implements Closeable {
 
     HikariDataSource dataSource
     Ports.UnitOfWork unitOfWork
+    TransferPlanner planner
     AccountService accounts
     TransferService transfers
     Sql sql
 
     TestLedger(Ports.VelocityLimiter limiter = Ports.VelocityLimiter.unlimited(),
                Ports.IdempotencyCache cache = Ports.IdempotencyCache.none(),
-               int poolSize = 16) {
-        dataSource = Database.connect(Infra.jdbcUrl(), Infra.POSTGRES.username, Infra.POSTGRES.password, poolSize)
+               int poolSize = 16,
+               LockStrategyKind strategy = LockStrategyKind.PESSIMISTIC,
+               RetryPolicy retryPolicy = new RetryPolicy(50, 1),
+               org.testcontainers.postgresql.PostgreSQLContainer postgres = Infra.POSTGRES) {
+        dataSource = Database.connect(postgres.jdbcUrl, postgres.username, postgres.password, poolSize)
         Database.migrate(dataSource)
         unitOfWork = new JooqUnitOfWork(dataSource)
-        def planner = unitOfWork.execute { tx ->
+        planner = unitOfWork.execute { tx ->
             new TransferPlanner(new FxRateTable(tx.fxRates().findAll()), new TreasuryAccounts(tx.accounts().treasuryIds()))
         }
         accounts = new AccountService(unitOfWork, planner, Clock.systemUTC())
-        transfers = new TransferService(unitOfWork, planner, limiter, cache, Clock.systemUTC())
+        transfers = new TransferService(
+                unitOfWork, strategy.create(planner), limiter, cache, Clock.systemUTC(), retryPolicy, Ports.Pause.sleeping())
         sql = new Sql(dataSource)
     }
 
@@ -51,11 +62,13 @@ class TestLedger implements Closeable {
     }
 
     /**
-     * The ledger invariants, checked directly in SQL over everything in the database:
-     * every transfer balances per currency, every customer balance equals the sum of its entries,
-     * and no customer balance is negative.
+     * The ledger invariants over everything in the database, in two independent ways: LedgerAudit
+     * replays the journal in Java, and the SQL below recomputes the same facts with GROUP BY.
      */
     void assertLedgerConsistent() {
+        def problems = LedgerAuditReader.violations(dataSource)
+        assert problems.isEmpty(): "ledger audit found: ${problems.take(10)}"
+
         def unbalanced = sql.rows('''
             select transfer_id, currency, sum(amount) total from journal_entries
             group by transfer_id, currency having sum(amount) <> 0''')
