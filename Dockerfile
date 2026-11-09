@@ -10,6 +10,8 @@ COPY src src
 RUN ./gradlew --no-daemon installDist -x test
 
 FROM eclipse-temurin:21-jre
+# Pick up OS security fixes released after the base image was built.
+RUN apt-get update && apt-get -y upgrade && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 ledger
 WORKDIR /app
 COPY --from=build /src/build/install/ledger-lab/ /app/

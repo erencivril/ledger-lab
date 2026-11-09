@@ -1,0 +1,8 @@
+# Accepted risks, reviewed 2026-11-10. Each entry expires so it has to be looked at again.
+# Both come from Jetty 9.4, which SparkJava 2.9.4 depends on. Open-source Jetty 9.4 ended at 9.4.58;
+# the fixed 9.4.6x builds are only available through commercial support. The real fix is the exit path in
+# docs/adr/0006 (move the routing layer to Javalin). Until then:
+# - jetty-security authentication bypass: the service does not use Jetty security or servlet authentication.
+# - jetty-http request parsing issue: the service is a local learning project and is not exposed to the internet.
+CVE-2026-10050 exp:2027-02-28
+CVE-2026-2332 exp:2027-02-28

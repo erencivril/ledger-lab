@@ -28,7 +28,7 @@ repositories {
 ext {
     jooqVersion = '3.20.20'
     flywayVersion = '11.20.3'
-    jacksonVersion = '2.19.4'
+    jacksonVersion = '2.22.4'
     spockVersion = '2.4-groovy-4.0'
     groovyVersion = '4.0.33'
     testcontainersVersion = '2.0.5'
@@ -49,6 +49,17 @@ sourceSets {
     benchmark {
         compileClasspath += sourceSets.main.output
         runtimeClasspath += sourceSets.main.output
+    }
+}
+
+// SparkJava 2.9.4 brings Jetty 9.4.48. Pin Jetty to 9.4.58, the last open-source 9.4 release,
+// which fixes CVE-2024-13009. See docs/adr/0006 for the Jetty issues that remain.
+configurations.configureEach {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.eclipse.jetty' && details.requested.version?.startsWith('9.4.')) {
+            details.useVersion '9.4.58.v20250814'
+            details.because 'last open-source Jetty 9.4 release'
+        }
     }
 }
 

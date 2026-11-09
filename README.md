@@ -215,7 +215,7 @@ PIT only looks at the domain. The application and persistence layers are checked
 1. `unit`: `./gradlew assemble test`, on JDK 21 and JDK 25.
 2. `integration`: `./gradlew integrationTest` with Testcontainers, on JDK 21 and JDK 25; prints the stress and isolation numbers in the run summary.
 3. `mutation`: `./gradlew pitest`, on JDK 21 and JDK 25; uploads the PIT report and writes the score to the summary.
-4. `docker`: `docker compose up --build --wait`, then `scripts/smoke.sh`; then the built image is scanned with Trivy (HIGH and CRITICAL findings that have a fix fail the CI run; unfixed ones are listed but do not).
+4. `docker`: `docker compose up --build --wait`, then `scripts/smoke.sh`; then the built image is scanned with Trivy (HIGH and CRITICAL findings that have a fix fail the CI run; unfixed ones are listed but do not). Two Jetty 9.4 findings that only have commercial fixes are accepted in `.trivyignore` with an expiry date; the reasoning is in ADR 0006.
 5. `secrets`: gitleaks over the working tree and the whole history.
 
 The JDK 25 legs compile and run the project on 25; Gradle itself runs on 21.

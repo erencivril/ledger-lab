@@ -16,7 +16,7 @@ SparkJava 2.9.4 was released in 2022 and has not had a release since. It is smal
 ## Consequences
 
 - The cost of leaving is one class plus a few lines, and the integration specs say when the replacement behaves the same.
-- Until then the library's age is a known risk. The container image is scanned in CI (see [../../README.md](../../README.md)), which would surface known issues in the dependency tree.
+- Until then the library's age is a known risk. The container image is scanned in CI (see [../../README.md](../../README.md)), and the scan did surface it: two Jetty 9.4 CVEs (CVE-2026-10050, CVE-2026-2332) are fixed only in commercial 9.4 builds. Jetty is pinned to 9.4.58, the last open-source 9.4 release, and the two findings are accepted in [`.trivyignore`](../../.trivyignore) with a reason and an expiry date (2027-02-28). If they are still open by then, the move to Javalin described above is the fix.
 - Nothing in the project depends on SparkJava features beyond routing, `before`/`after` filters and exception mapping.
 
 ## Evidence
