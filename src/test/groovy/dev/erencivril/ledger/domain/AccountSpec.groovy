@@ -96,4 +96,22 @@ class AccountSpec extends Specification {
         UUID.randomUUID() | null  | AccountKind.CUSTOMER
         UUID.randomUUID() | 'a'   | null
     }
+
+    def "debitWithoutFundsCheck may take the balance below zero and leaves the original untouched"() {
+        given:
+        def a = account('10.00')
+
+        expect:
+        a.debitWithoutFundsCheck(money('4.00')).balance() == money('6.00')
+        a.debitWithoutFundsCheck(money('10.01')).balance() == money('-0.01')
+        a.balance() == money('10.00')
+    }
+
+    def "debitWithoutFundsCheck still refuses a different currency"() {
+        when:
+        account('10.00').debitWithoutFundsCheck(money('1.00', EUR))
+
+        then:
+        thrown(DomainException.CurrencyMismatch)
+    }
 }

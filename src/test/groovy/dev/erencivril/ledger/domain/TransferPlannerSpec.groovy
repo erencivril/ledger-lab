@@ -278,4 +278,60 @@ class TransferPlannerSpec extends Specification {
         where:
         amount << ['0.00', '-5.00', '1000000000000.01']
     }
+
+    def "planWithoutFundsCheck plans a transfer the account cannot pay for, because the database checks the funds"() {
+        given:
+        def from = account('5.00')
+        def to = account('0.00')
+
+        when:
+        def plan = planner.planWithoutFundsCheck(from, to, money('30.00'))
+
+        then:
+        plan.sourceAmount() == money('30.00')
+        plan.destinationAmount() == money('30.00')
+        plan.journal().lines() == [
+                new JournalLine(from.id(), money('-30.00')),
+                new JournalLine(to.id(), money('30.00')),
+        ]
+    }
+
+    def "planWithoutFundsCheck still applies every other rule"() {
+        when:
+        planner.planWithoutFundsCheck(from, to, amount)
+
+        then:
+        thrown(expected)
+
+        where:
+        from            | to                   | amount             | expected
+        account('9.00') | account('0.00')      | money('0.00')      | DomainException.InvalidAmount
+        account('9.00') | account('0.00')      | money('1.00', EUR) | DomainException.CurrencyMismatch
+        account('9.00') | account('0.00', GBP) | money('1.00')      | DomainException.NoFxRate
+    }
+
+    def "planWithoutFundsCheck rejects a transfer to the same account"() {
+        given:
+        def one = account('9.00')
+
+        when:
+        planner.planWithoutFundsCheck(one, one, money('1.00'))
+
+        then:
+        thrown(DomainException.SameAccount)
+    }
+
+    def "planWithoutFundsCheck converts across currencies like plan does"() {
+        given:
+        def from = account('0.00', USD)
+        def to = account('0.00', EUR)
+
+        when:
+        def plan = planner.planWithoutFundsCheck(from, to, money('50.00'))
+
+        then:
+        plan.destinationAmount() == money('46.00', EUR)
+        plan.fxRate() == new BigDecimal('0.92')
+        plan.journal().lines().size() == 4
+    }
 }
