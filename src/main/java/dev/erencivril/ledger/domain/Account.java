@@ -39,6 +39,15 @@ public record Account(UUID id, String owner, Currency currency, AccountKind kind
         return withBalance(balance.minus(amount));
     }
 
+    /**
+     * Subtracts without looking at the balance, so the result may be negative. Only for the atomic
+     * strategy, where the database refuses an overdraft in the UPDATE itself and the balance held in
+     * memory may be out of date. The currency is still checked.
+     */
+    public Account debitWithoutFundsCheck(Money amount) {
+        return withBalance(balance.minus(amount));
+    }
+
     public Account credit(Money amount) {
         return withBalance(balance.plus(amount));
     }

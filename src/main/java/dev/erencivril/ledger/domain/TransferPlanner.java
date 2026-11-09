@@ -25,6 +25,21 @@ public final class TransferPlanner {
      * @param amount denominated in the source account's currency
      */
     public TransferPlan plan(Account source, Account destination, Money amount) {
+        validate(source, destination, amount);
+        return build(source, destination, amount, source.debit(amount));
+    }
+
+    /**
+     * The same as {@link #plan} except that it does not check that the source can pay. For the atomic
+     * strategy, where the UPDATE statement itself refuses an overdraft. The balances in the returned plan
+     * are then meaningless and must be ignored; the journal and the amounts are valid.
+     */
+    public TransferPlan planWithoutFundsCheck(Account source, Account destination, Money amount) {
+        validate(source, destination, amount);
+        return build(source, destination, amount, source.debitWithoutFundsCheck(amount));
+    }
+
+    private static void validate(Account source, Account destination, Money amount) {
         if (source.id().equals(destination.id())) {
             throw new DomainException.SameAccount(source.id());
         }
@@ -36,9 +51,9 @@ public final class TransferPlanner {
         if (source.kind() != AccountKind.CUSTOMER || destination.kind() != AccountKind.CUSTOMER) {
             throw new IllegalArgumentException("Transfers are only allowed between customer accounts");
         }
+    }
 
-        Account debited = source.debit(amount);
-
+    private TransferPlan build(Account source, Account destination, Money amount, Account debited) {
         if (source.currency() == destination.currency()) {
             Journal journal = new Journal(List.of(
                     new JournalLine(source.id(), amount.negate()), new JournalLine(destination.id(), amount)));
