@@ -65,6 +65,7 @@ dependencies {
     testImplementation "org.apache.groovy:groovy"
     testImplementation "org.spockframework:spock-core:${spockVersion}"
     testImplementation "org.apache.groovy:groovy-sql"
+    testImplementation "org.apache.groovy:groovy-json"
     testImplementation "com.tngtech.archunit:archunit:1.5.1"
     testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 
