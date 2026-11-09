@@ -200,8 +200,7 @@ class TransferPlannerSpec extends Specification {
 
         then:
         def e = thrown(DomainException.CurrencyMismatch)
-        e.message.contains('EUR')
-        e.message.contains('USD')
+        e.message == 'Amount is in EUR but the source account holds USD'
     }
 
     def "a currency pair without a rate is rejected"() {
