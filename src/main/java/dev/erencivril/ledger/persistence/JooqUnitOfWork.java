@@ -6,6 +6,8 @@ import dev.erencivril.ledger.application.Ports.FxRateRepository;
 import dev.erencivril.ledger.application.Ports.IdempotencyRepository;
 import dev.erencivril.ledger.application.Ports.JournalRepository;
 import dev.erencivril.ledger.application.Ports.LedgerTransaction;
+import dev.erencivril.ledger.application.Ports.RiskRepository;
+import dev.erencivril.ledger.application.Ports.RuleSetRepository;
 import dev.erencivril.ledger.application.Ports.TransferRepository;
 import dev.erencivril.ledger.application.Ports.UnitOfWork;
 import java.sql.SQLNonTransientConnectionException;
@@ -78,7 +80,9 @@ public final class JooqUnitOfWork implements UnitOfWork {
             TransferRepository transfers,
             JournalRepository journal,
             IdempotencyRepository idempotency,
-            FxRateRepository fxRates)
+            FxRateRepository fxRates,
+            RiskRepository risk,
+            RuleSetRepository ruleSets)
             implements LedgerTransaction {
 
         JooqLedgerTransaction(DSLContext tx) {
@@ -87,7 +91,9 @@ public final class JooqUnitOfWork implements UnitOfWork {
                     new JooqTransferRepository(tx),
                     new JooqJournalRepository(tx),
                     new JooqIdempotencyRepository(tx),
-                    new JooqFxRateRepository(tx));
+                    new JooqFxRateRepository(tx),
+                    new JooqRiskRepository(tx),
+                    new JooqRuleSetRepository(tx));
         }
     }
 }

@@ -11,9 +11,12 @@ import dev.erencivril.ledger.application.Ports.Pause;
 import dev.erencivril.ledger.application.Ports.UnitOfWork;
 import dev.erencivril.ledger.application.Ports.VelocityLimiter;
 import dev.erencivril.ledger.domain.Money;
+import dev.erencivril.ledger.domain.risk.RiskAction;
+import dev.erencivril.ledger.domain.risk.RiskDecision;
 import dev.erencivril.ledger.domain.Transfer;
 import dev.erencivril.ledger.domain.TransferKind;
 import dev.erencivril.ledger.domain.TransferPlan;
+import dev.erencivril.ledger.domain.TransferStatus;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -37,8 +40,11 @@ import org.slf4j.LoggerFactory;
  *   <li>Look for an earlier result for the key (Redis first, then Postgres). A replay returns early and
  *       does not use up velocity budget.
  *   <li>Check the velocity limit for the source account.
+ *   <li>Ask the risk checks. BLOCK and STEP_UP stop here with an error and nothing moves; the decision is
+ *       still written to the audit table.
  *   <li>In one database transaction: claim the key, change both balances (the {@link TransferStrategy}
- *       decides how), write the transfer and the journal.
+ *       decides how) or, for HOLD, park the money in a hold account ({@link HoldService}), write the
+ *       transfer, the journal and the risk decision.
  * </ol>
  *
  * If the strategy reports a {@link ConcurrentUpdate}, the whole transaction, including the key claim, is
@@ -56,8 +62,11 @@ public final class TransferService {
     private final Clock clock;
     private final RetryPolicy retryPolicy;
     private final Pause pause;
+    private final RiskAssessor risk;
+    private final HoldService holds;
     private final AtomicLong retries = new AtomicLong();
 
+    /** A service without risk checks: every payment goes ahead. */
     public TransferService(
             UnitOfWork unitOfWork,
             TransferStrategy strategy,
@@ -66,6 +75,19 @@ public final class TransferService {
             Clock clock,
             RetryPolicy retryPolicy,
             Pause pause) {
+        this(unitOfWork, strategy, velocityLimiter, cache, clock, retryPolicy, pause, RiskAssessor.disabled(), null);
+    }
+
+    public TransferService(
+            UnitOfWork unitOfWork,
+            TransferStrategy strategy,
+            VelocityLimiter velocityLimiter,
+            IdempotencyCache cache,
+            Clock clock,
+            RetryPolicy retryPolicy,
+            Pause pause,
+            RiskAssessor risk,
+            HoldService holds) {
         this.unitOfWork = unitOfWork;
         this.strategy = strategy;
         this.velocityLimiter = velocityLimiter;
@@ -73,6 +95,8 @@ public final class TransferService {
         this.clock = clock;
         this.retryPolicy = retryPolicy;
         this.pause = pause;
+        this.risk = risk;
+        this.holds = holds;
     }
 
     /** How many times an attempt was repeated because of a {@link ConcurrentUpdate}, since this service was created. */
@@ -80,8 +104,19 @@ public final class TransferService {
         return retries.get();
     }
 
+    /**
+     * @param stepUpConfirmed the customer has passed the extra check the risk engine asked for earlier
+     */
     public record TransferCommand(
-            String idempotencyKey, UUID sourceAccountId, UUID destinationAccountId, Money amount) {
+            String idempotencyKey,
+            UUID sourceAccountId,
+            UUID destinationAccountId,
+            Money amount,
+            boolean stepUpConfirmed) {
+
+        public TransferCommand(String idempotencyKey, UUID sourceAccountId, UUID destinationAccountId, Money amount) {
+            this(idempotencyKey, sourceAccountId, destinationAccountId, amount, false);
+        }
 
         /**
          * A hash of the request body. Two requests are "the same" when this matches, so the amount is
@@ -99,8 +134,11 @@ public final class TransferService {
         }
     }
 
-    /** @param replayed true when this is the stored result of an earlier request with the same key */
-    public record TransferResult(Transfer transfer, boolean replayed) {}
+    /**
+     * @param replayed true when this is the stored result of an earlier request with the same key
+     * @param risk the risk decision behind the transfer, or null when risk checks were off
+     */
+    public record TransferResult(Transfer transfer, boolean replayed, RiskDecision risk) {}
 
     public TransferResult transfer(TransferCommand command) {
         String fingerprint = command.fingerprint();
@@ -112,20 +150,42 @@ public final class TransferService {
 
         velocityLimiter.acquire(command.sourceAccountId());
 
-        TransferResult result = executeWithRetries(command, fingerprint);
+        RiskAssessment assessment = risk.assess(command).orElse(null);
+        if (assessment != null) {
+            refuseIfNeeded(command, assessment);
+        }
+
+        TransferResult result = executeWithRetries(command, fingerprint, assessment);
         cache.put(command.idempotencyKey(), fingerprint, result.transfer().id());
         return result;
+    }
+
+    /** BLOCK and STEP_UP stop the payment. The decision is kept in the audit table either way. */
+    private void refuseIfNeeded(TransferCommand command, RiskAssessment assessment) {
+        RiskDecision decision = assessment.decision();
+        if (decision.action() != RiskAction.BLOCK && decision.action() != RiskAction.STEP_UP) {
+            return;
+        }
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        unitOfWork.execute(tx -> {
+            tx.risk().insertDecision(assessment.toRecord(command, null, now));
+            return null;
+        });
+        if (decision.action() == RiskAction.BLOCK) {
+            throw new ApplicationException.TransferBlocked(decision.reasonCodes());
+        }
+        throw new ApplicationException.StepUpRequired(decision.reasonCodes());
     }
 
     /**
      * Runs the transfer transaction. When it loses a race it waits a random time and runs it again from
      * the start; the failed attempt rolled back, so the next one sees a clean slate.
      */
-    private TransferResult executeWithRetries(TransferCommand command, String fingerprint) {
+    private TransferResult executeWithRetries(TransferCommand command, String fingerprint, RiskAssessment assessment) {
         int attempt = 1;
         while (true) {
             try {
-                return unitOfWork.execute(tx -> executeInTransaction(tx, command, fingerprint));
+                return unitOfWork.execute(tx -> executeInTransaction(tx, command, fingerprint, assessment));
             } catch (ConcurrentUpdate e) {
                 if (attempt >= retryPolicy.maxAttempts()) {
                     throw e;
@@ -143,21 +203,27 @@ public final class TransferService {
                 .orElseThrow(() -> new ApplicationException.TransferNotFound(id));
     }
 
+    /** The risk decision behind a transfer, if there is one. */
+    public Optional<RiskDecision> riskOf(UUID transferId) {
+        return unitOfWork.execute(tx -> tx.risk().findDecision(transferId));
+    }
+
     private Optional<TransferResult> findReplay(String key, String fingerprint) {
         Optional<CachedKey> cached = cache.get(key);
         if (cached.isPresent()) {
             requireSameRequest(key, fingerprint, cached.get().fingerprint());
-            Optional<Transfer> transfer =
-                    unitOfWork.execute(tx -> tx.transfers().find(cached.get().transferId()));
-            if (transfer.isPresent()) {
-                return Optional.of(new TransferResult(transfer.get(), true));
+            Optional<TransferResult> result = unitOfWork.execute(tx ->
+                    tx.transfers().find(cached.get().transferId()).map(transfer -> replayResult(tx, transfer)));
+            if (result.isPresent()) {
+                return result;
             }
             log.warn("Idempotency cache points at a missing transfer for key {}; falling back to Postgres", key);
         }
         return unitOfWork.execute(tx -> tx.idempotency().find(key).map(record -> replayOf(tx, record, fingerprint)));
     }
 
-    private TransferResult executeInTransaction(LedgerTransaction tx, TransferCommand command, String fingerprint) {
+    private TransferResult executeInTransaction(
+            LedgerTransaction tx, TransferCommand command, String fingerprint, RiskAssessment assessment) {
         if (!tx.idempotency().tryClaim(command.idempotencyKey(), fingerprint)) {
             // Another request committed this key between our lookup and now.
             IdempotencyRecord record = tx.idempotency()
@@ -166,11 +232,25 @@ public final class TransferService {
             return replayOf(tx, record, fingerprint);
         }
 
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        boolean hold = assessment != null && assessment.decision().action() == RiskAction.HOLD;
+        Posting posting = hold ? holds.place(tx, command, now) : moveMoney(tx, command, now);
+        Transfer transfer = posting.transfer();
+
+        tx.transfers().insert(transfer);
+        tx.journal().append(transfer.id(), posting.entries(), now);
+        tx.idempotency().attach(command.idempotencyKey(), transfer.id());
+        if (assessment != null) {
+            tx.risk().insertDecision(assessment.toRecord(command, transfer.id(), now));
+        }
+        return new TransferResult(transfer, false, assessment == null ? null : assessment.decision());
+    }
+
+    /** The ordinary path: the {@link TransferStrategy} changes both balances. */
+    private Posting moveMoney(LedgerTransaction tx, TransferCommand command, Instant now) {
         BalanceChange change = strategy.changeBalances(
                 tx, command.sourceAccountId(), command.destinationAccountId(), command.amount());
         TransferPlan plan = change.plan();
-
-        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         Transfer transfer = new Transfer(
                 UUID.randomUUID(),
                 TransferKind.TRANSFER,
@@ -179,15 +259,12 @@ public final class TransferService {
                 plan.sourceAmount(),
                 plan.destinationAmount(),
                 plan.fxRate(),
-                now);
-        tx.transfers().insert(transfer);
-
+                now,
+                TransferStatus.COMPLETED);
         List<NewJournalEntry> entries = plan.journal().lines().stream()
                 .map(line -> new NewJournalEntry(line.accountId(), line.amount(), balanceAfter(line.accountId(), command, change)))
                 .toList();
-        tx.journal().append(transfer.id(), entries, now);
-        tx.idempotency().attach(command.idempotencyKey(), transfer.id());
-        return new TransferResult(transfer, false);
+        return new Posting(transfer, entries);
     }
 
     private static Money balanceAfter(UUID accountId, TransferCommand command, BalanceChange change) {
@@ -208,7 +285,11 @@ public final class TransferService {
         Transfer transfer = tx.transfers()
                 .find(record.transferId())
                 .orElseThrow(() -> new IllegalStateException("Transfer missing for key " + record.key()));
-        return new TransferResult(transfer, true);
+        return replayResult(tx, transfer);
+    }
+
+    private static TransferResult replayResult(LedgerTransaction tx, Transfer transfer) {
+        return new TransferResult(transfer, true, tx.risk().findDecision(transfer.id()).orElse(null));
     }
 
     private static void requireSameRequest(String key, String expected, String stored) {

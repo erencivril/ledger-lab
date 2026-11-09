@@ -117,6 +117,15 @@ final class JooqAccountRepository implements AccountRepository {
         return ids;
     }
 
+    @Override
+    public Map<Currency, UUID> holdIds() {
+        Map<Currency, UUID> ids = new EnumMap<>(Currency.class);
+        dsl.selectFrom(ACCOUNTS)
+                .where(ACCOUNTS.KIND.eq(AccountKind.HOLD.name()))
+                .forEach(row -> ids.put(Currency.parse(row.getCurrency()), row.getId()));
+        return ids;
+    }
+
     private static Account toAccount(AccountsRecord row) {
         Currency currency = Currency.parse(row.getCurrency());
         return new Account(

@@ -5,6 +5,7 @@ import dev.erencivril.ledger.application.Ports.StatementPage;
 import dev.erencivril.ledger.domain.Account;
 import dev.erencivril.ledger.domain.Money;
 import dev.erencivril.ledger.domain.Transfer;
+import dev.erencivril.ledger.domain.risk.RiskDecision;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -39,8 +40,10 @@ final class Views {
             MoneyView sourceAmount,
             MoneyView destinationAmount,
             String fxRate,
-            Instant createdAt) {
-        static TransferView of(Transfer transfer) {
+            Instant createdAt,
+            String status,
+            RiskView risk) {
+        static TransferView of(Transfer transfer, RiskDecision risk) {
             return new TransferView(
                     transfer.id(),
                     transfer.kind().name(),
@@ -49,7 +52,18 @@ final class Views {
                     MoneyView.of(transfer.sourceAmount()),
                     MoneyView.of(transfer.destinationAmount()),
                     transfer.fxRate() == null ? null : transfer.fxRate().toPlainString(),
-                    transfer.createdAt());
+                    transfer.createdAt(),
+                    transfer.status().name(),
+                    RiskView.of(risk));
+        }
+    }
+
+    /** The risk decision behind a transfer. Absent when risk checks were off. */
+    record RiskView(String action, int ruleSetVersion, List<String> reasonCodes) {
+        static RiskView of(RiskDecision decision) {
+            return decision == null
+                    ? null
+                    : new RiskView(decision.action().name(), decision.ruleSetVersion(), decision.reasonCodes());
         }
     }
 

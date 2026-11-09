@@ -1,14 +1,19 @@
 package dev.erencivril.ledger.http;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.erencivril.ledger.application.AccountService;
+import dev.erencivril.ledger.application.HoldService;
 import dev.erencivril.ledger.application.Ports.HealthProbe;
 import dev.erencivril.ledger.application.TransferService;
 import dev.erencivril.ledger.application.TransferService.TransferCommand;
 import dev.erencivril.ledger.domain.Account;
 import dev.erencivril.ledger.domain.Currency;
 import dev.erencivril.ledger.domain.Money;
+import dev.erencivril.ledger.domain.Transfer;
+import dev.erencivril.ledger.domain.TransferStatus;
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,12 +30,19 @@ public final class LedgerRoutes {
 
     private final AccountService accounts;
     private final TransferService transfers;
+    private final HoldService holds;
     private final HealthProbe postgres;
     private final HealthProbe redis;
 
-    public LedgerRoutes(AccountService accounts, TransferService transfers, HealthProbe postgres, HealthProbe redis) {
+    public LedgerRoutes(
+            AccountService accounts,
+            TransferService transfers,
+            HoldService holds,
+            HealthProbe postgres,
+            HealthProbe redis) {
         this.accounts = accounts;
         this.transfers = transfers;
+        this.holds = holds;
         this.postgres = postgres;
         this.redis = redis;
     }
@@ -50,12 +62,15 @@ public final class LedgerRoutes {
         http.get("/accounts/:id/statement", this::statement);
         http.post("/transfers", this::createTransfer);
         http.get("/transfers/:id", this::getTransfer);
+        http.post("/transfers/:id/release", this::releaseTransfer);
+        http.post("/transfers/:id/reject", this::rejectTransfer);
         http.get("/health", this::health);
 
         http.exception(Exception.class, (error, req, res) -> render(res, error));
         http.notFound((req, res) -> {
             res.type(JSON);
-            return Json.write(ApiError.of(404, "route_not_found", "No route for " + req.requestMethod() + " " + req.pathInfo()));
+            return Json.write(new ErrorBody(
+                    "route_not_found", "No route for " + req.requestMethod() + " " + req.pathInfo(), null));
         });
     }
 
@@ -97,17 +112,33 @@ public final class LedgerRoutes {
         UUID destination = Json.requiredUuid(body, "destinationAccountId");
         Currency currency = Currency.parse(Json.requiredText(body, "currency"));
         Money amount = new Money(Json.requiredDecimal(body, "amount"), currency);
+        boolean stepUpConfirmed = Json.optionalBoolean(body, "stepUpConfirmed");
 
-        TransferService.TransferResult result = transfers.transfer(new TransferCommand(key, source, destination, amount));
-        res.status(result.replayed() ? 200 : 201);
+        TransferService.TransferResult result =
+                transfers.transfer(new TransferCommand(key, source, destination, amount, stepUpConfirmed));
+        // 202: the request was understood and the money has left the sender, but the payee is not paid yet.
+        boolean held = result.transfer().status() == TransferStatus.PENDING;
+        res.status(result.replayed() ? 200 : held ? 202 : 201);
         res.header("Idempotency-Replayed", String.valueOf(result.replayed()));
         res.header("Location", "/transfers/" + result.transfer().id());
-        return Json.write(Views.TransferView.of(result.transfer()));
+        return Json.write(Views.TransferView.of(result.transfer(), result.risk()));
     }
 
     private String getTransfer(Request req, Response res) {
         UUID id = Json.parseUuid(req.params(":id"), "id");
-        return Json.write(Views.TransferView.of(transfers.get(id)));
+        return Json.write(Views.TransferView.of(transfers.get(id), transfers.riskOf(id).orElse(null)));
+    }
+
+    private String releaseTransfer(Request req, Response res) {
+        UUID id = Json.parseUuid(req.params(":id"), "id");
+        Transfer released = holds.release(id);
+        return Json.write(Views.TransferView.of(released, transfers.riskOf(id).orElse(null)));
+    }
+
+    private String rejectTransfer(Request req, Response res) {
+        UUID id = Json.parseUuid(req.params(":id"), "id");
+        Transfer rejected = holds.reject(id);
+        return Json.write(Views.TransferView.of(rejected, transfers.riskOf(id).orElse(null)));
     }
 
     /** 200 while Postgres is up. Redis being down is reported but does not fail the check: transfers still work. */
@@ -129,10 +160,12 @@ public final class LedgerRoutes {
         if (api.retryAfterSeconds() != null) {
             res.header("Retry-After", String.valueOf(api.retryAfterSeconds()));
         }
-        res.body(Json.write(new ErrorBody(api.code(), api.message())));
+        res.body(Json.write(new ErrorBody(api.code(), api.message(), api.reasonCodes())));
     }
 
-    record ErrorBody(String code, String message) {}
+    /** {@code reasonCodes} is only present on risk refusals. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    record ErrorBody(String code, String message, List<String> reasonCodes) {}
 
     private static Integer intParam(Request req, String name, int min, int max) {
         String raw = req.queryParams(name);

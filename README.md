@@ -21,7 +21,7 @@ The code and the tests are organised around these six facts. `LedgerAudit` is th
 
 More detail lives in:
 
-- [docs/adr](docs/adr/README.md): the seven design decisions, with their evidence.
+- [docs/adr](docs/adr/README.md): the design decisions, with their evidence.
 - [docs/failure-modes.md](docs/failure-modes.md): what happens when something breaks, and which spec proves it.
 - [docs/isolation.md](docs/isolation.md): lost update, write skew and serialization retries, shown on PostgreSQL.
 - [docs/benchmarks.md](docs/benchmarks.md): the three lock strategies compared, with the hardware.
@@ -109,6 +109,29 @@ Redis does two jobs and neither affects correctness.
 1. **Velocity limit.** A sliding window per source account, kept in a sorted set and updated by one Lua script so the check and the update are atomic across app instances. The script uses the Redis clock. The default is 10 transfers per 60 seconds, set with `VELOCITY_MAX_TRANSFERS` and `VELOCITY_WINDOW_SECONDS`. The next one gets `429` with code `velocity_limit_exceeded` and a `Retry-After` header. The limit counts attempts that get past the idempotency lookup, so a replay of a finished transfer is free, but a transfer later rejected for insufficient funds still counts. If Redis is down the limiter lets the transfer through and logs a warning (`VELOCITY_FAIL_OPEN=false` makes it refuse the transfer instead). I chose fail-open because the ledger is correct without this rule; it is a risk control, not an integrity control.
 2. **Idempotency cache.** After a transfer commits, `idem:<key>` is written with a 24 hour expiry so a replay can skip one query. A miss, a stale entry, garbage, or Redis being down all fall back to PostgreSQL. A cache entry is only used when its stored request hash matches the new request, and it only ever points at a transfer that is looked up in PostgreSQL. Nothing is ever created or moved because of what Redis says. Tests delete entries, poison them, and point the app at a Redis that is not there.
 
+## Risk checks
+
+Before money moves, `RiskEngine` looks at the payment and answers `ALLOW`, `WARN`, `STEP_UP`, `HOLD` or `BLOCK`, with the reason codes of the rules that fired. This part of the project is about payment correctness, not about fraud modelling: the rules are simple heuristics with thresholds I chose, and they will be wrong in both directions.
+
+| Action | What happens |
+|---|---|
+| `ALLOW`, `WARN` | The transfer goes ahead. `WARN` is kept in the audit table for review. |
+| `STEP_UP` | `403 step_up_required`. Nothing moved. Send the same request again with `"stepUpConfirmed": true` and it is treated as a warning. This is a stand-in for a second factor, which this project does not have. |
+| `HOLD` | The sender is debited, the money sits in a hold account, the transfer is `PENDING` and the answer is `202`. `POST /transfers/{id}/release` pays the payee, `.../reject` refunds the sender. |
+| `BLOCK` | `403 blocked_by_risk`. Nothing moved. |
+
+The rules of the first rule set (`src/main/resources/risk/ruleset-v1.yaml`):
+
+| Rule | Fires when |
+|---|---|
+| `FIRST_PAYMENT_LARGE` | the sender has never completed a payment to this payee and the amount is at least 1,000 USD |
+| `AMOUNT_DEVIATION` | the amount is at least 5 times the sender's average payment, with at least 3 earlier payments |
+| `NEW_PAYEE_ACCOUNT` | the payee account is under 72 hours old and the amount is at least 300 USD |
+
+Rules live in YAML, are loaded into PostgreSQL as a numbered version, and a published version cannot change: the application compares the stored hash with the file and refuses to start if they differ. Every decision is written to `risk_decisions` with the version and the rules that fired, and those tables reject UPDATE and DELETE. Decisions are made before the transfer transaction, so a payment that lands in between is not seen. See [ADR 0008](docs/adr/0008-risk-engine-in-the-domain.md) and, for the hold, [ADR 0009](docs/adr/0009-holds-use-a-hold-account.md).
+
+`LedgerAudit` stays true while transfers wait: the hold account has no stored balance, and the audit checks that its entries add up to the pending transfers. A crash between the hold and the decision loses nothing, see [docs/failure-modes.md](docs/failure-modes.md).
+
 ## API
 
 Amounts are strings. Errors are always `{"code": "...", "message": "..."}`.
@@ -118,8 +141,10 @@ Amounts are strings. Errors are always `{"code": "...", "message": "..."}`.
 | `POST /accounts` | Body: `owner`, `currency`, optional `initialBalance`. Returns `201`. An opening balance is paid by the treasury through a normal journal. |
 | `GET /accounts/{id}` | Account with its balance. |
 | `GET /accounts/{id}/statement?limit=20&cursor=...` | Journal entries, newest first. `limit` is 1 to 100. Pass `nextCursor` back as `cursor` for the next page; it is `null` on the last page. Each entry has the amount and the balance after it. |
-| `POST /transfers` | Header `Idempotency-Key`. Body: `sourceAccountId`, `destinationAccountId`, `amount`, `currency` (the source account's currency). |
-| `GET /transfers/{id}` | One transfer, including the amount on each side and the FX rate used. |
+| `POST /transfers` | Header `Idempotency-Key`. Body: `sourceAccountId`, `destinationAccountId`, `amount`, `currency` (the source account's currency), optional `stepUpConfirmed`. `201` when completed, `202` when the risk checks hold it. |
+| `GET /transfers/{id}` | One transfer, including the amount on each side, the FX rate used, its status and the risk decision. |
+| `POST /transfers/{id}/release` | Finishes a held transfer: the payee is paid. `409 transfer_not_pending` if it was already decided. |
+| `POST /transfers/{id}/reject` | Cancels a held transfer: the sender is refunded. |
 | `GET /health` | `200` while PostgreSQL is reachable. Reports Redis too: `up`, or `degraded` when Redis is down. `503` if PostgreSQL is down. |
 
 Currencies: `USD`, `EUR`, `GBP`, `TRY`, `JPY`, `KWD`. Codes are case-sensitive.
@@ -127,8 +152,9 @@ Currencies: `USD`, `EUR`, `GBP`, `TRY`, `JPY`, `KWD`. Codes are case-sensitive.
 | Status | When | Codes |
 |---|---|---|
 | 400 | Malformed or invalid input | `invalid_json`, `missing_field`, `invalid_field`, `invalid_id`, `invalid_amount`, `unsupported_currency`, `invalid_owner`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_limit`, `invalid_cursor` |
+| 403 | The risk checks refused the payment, or want a confirmation first (the body lists `reasonCodes`) | `blocked_by_risk`, `step_up_required` |
 | 404 | Unknown account, transfer or route | `account_not_found`, `transfer_not_found`, `route_not_found` |
-| 409 | Idempotency key reused with a different body, or a transfer that lost its race on every attempt (safe to repeat) | `idempotency_key_reused`, `concurrent_update` |
+| 409 | Idempotency key reused with a different body, a transfer that lost its race on every attempt (safe to repeat), or a hold that was already decided | `idempotency_key_reused`, `concurrent_update`, `transfer_not_pending` |
 | 422 | The request is well formed but a rule refuses it | `same_account`, `insufficient_funds`, `currency_mismatch`, `no_fx_rate` |
 | 429 | Velocity limit | `velocity_limit_exceeded` |
 | 500 | Anything unexpected | `internal_error` |
@@ -178,6 +204,8 @@ Settings are environment variables:
 | `VELOCITY_MAX_TRANSFERS` | `10` |
 | `VELOCITY_WINDOW_SECONDS` | `60` |
 | `VELOCITY_FAIL_OPEN` | `true` |
+| `RISK_ENABLED` | `true` |
+| `RISK_RULESET_VERSION` | newest bundled version |
 
 The schema is created by Flyway when the app starts. The jOOQ classes are generated at build time from the same migration files using jOOQ's `DDLDatabase`, so building needs no running database and the generated code cannot drift from the schema.
 
@@ -226,7 +254,7 @@ Gradle's build cache is off, so tests are never skipped as "from cache".
 
 - **No authentication or ownership.** Anyone who knows an account id can transfer from it. This is the biggest gap if it were to be used for real.
 - **FX is a fixed, illustrative table.** No live rates, no spread, no fees, no rate expiry. A rate and its inverse are not exact reciprocals. Only six currencies, as an enum.
-- **No reversals.** There is no refund, cancel or hold. A transfer is final once committed.
+- **No reversals.** A completed transfer is final. Only a held transfer can be cancelled (rejected), and only before it is released.
 - **Idempotency keys are global and never expire.** They are not scoped to a client, and the table grows forever. A real service would scope keys per API client and delete old ones.
 - **Velocity limit is simple.** Per source account only, counts attempts, and fails open by default.
 - **SparkJava is unmaintained** (last release 2022). It is kept behind a thin routing layer with a named exit path, see [ADR 0006](docs/adr/0006-sparkjava-behind-a-thin-routing-layer.md); the image is scanned in CI.

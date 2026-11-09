@@ -1,5 +1,6 @@
 package dev.erencivril.ledger.application;
 
+import java.util.List;
 import java.util.UUID;
 
 /** Failures that are not domain rules: missing things, key reuse, rate limiting, lost races, outages. */
@@ -50,6 +51,34 @@ public abstract sealed class ApplicationException extends RuntimeException {
 
         public long retryAfterSeconds() {
             return retryAfterSeconds;
+        }
+    }
+
+    /** The risk engine refused the payment. Nothing moved. */
+    public static final class TransferBlocked extends ApplicationException {
+        private final List<String> reasonCodes;
+
+        public TransferBlocked(List<String> reasonCodes) {
+            super("blocked_by_risk", "The transfer was refused by the risk checks");
+            this.reasonCodes = List.copyOf(reasonCodes);
+        }
+
+        public List<String> reasonCodes() {
+            return reasonCodes;
+        }
+    }
+
+    /** The risk engine wants extra confirmation first. Nothing moved; repeat the request with it confirmed. */
+    public static final class StepUpRequired extends ApplicationException {
+        private final List<String> reasonCodes;
+
+        public StepUpRequired(List<String> reasonCodes) {
+            super("step_up_required", "This transfer needs extra confirmation. Send it again with stepUpConfirmed=true");
+            this.reasonCodes = List.copyOf(reasonCodes);
+        }
+
+        public List<String> reasonCodes() {
+            return reasonCodes;
         }
     }
 

@@ -11,7 +11,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import javax.sql.DataSource;
 
@@ -34,8 +36,9 @@ public final class LedgerAuditReader {
             try (Statement statement = connection.createStatement()) {
                 List<AccountRow> accounts = readAccounts(statement);
                 List<EntryRow> entries = readEntries(statement);
+                Map<Currency, BigDecimal> pending = readPending(statement);
                 connection.commit();
-                return LedgerAudit.violations(accounts, entries);
+                return LedgerAudit.violations(accounts, entries, pending);
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Could not read the ledger for the audit", e);
@@ -47,12 +50,24 @@ public final class LedgerAuditReader {
         try (ResultSet rows = statement.executeQuery("select id, kind, balance from accounts")) {
             while (rows.next()) {
                 AccountKind kind = AccountKind.valueOf(rows.getString("kind"));
-                // A treasury account has no meaningful stored balance, so none is passed on.
+                // A treasury or hold account has no meaningful stored balance, so none is passed on.
                 BigDecimal stored = kind == AccountKind.CUSTOMER ? rows.getBigDecimal("balance") : null;
                 accounts.add(new AccountRow(rows.getObject("id", UUID.class), kind, stored));
             }
         }
         return accounts;
+    }
+
+    private static Map<Currency, BigDecimal> readPending(Statement statement) throws SQLException {
+        Map<Currency, BigDecimal> pending = new EnumMap<>(Currency.class);
+        String sql = "select source_currency, sum(source_amount) as total from transfers "
+                + "where status = 'PENDING' group by source_currency";
+        try (ResultSet rows = statement.executeQuery(sql)) {
+            while (rows.next()) {
+                pending.put(Currency.parse(rows.getString("source_currency")), rows.getBigDecimal("total"));
+            }
+        }
+        return pending;
     }
 
     private static List<EntryRow> readEntries(Statement statement) throws SQLException {

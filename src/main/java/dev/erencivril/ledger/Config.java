@@ -17,7 +17,9 @@ public record Config(
         boolean velocityFailOpen,
         LockStrategyKind lockStrategy,
         int transferMaxAttempts,
-        int transferRetryBaseMillis) {
+        int transferRetryBaseMillis,
+        boolean riskEnabled,
+        Integer riskRuleSetVersion) {
 
     public static Config fromEnv(Map<String, String> env) {
         return new Config(
@@ -33,7 +35,9 @@ public record Config(
                 Boolean.parseBoolean(env.getOrDefault("VELOCITY_FAIL_OPEN", "true")),
                 strategyOf(env),
                 intOf(env, "TRANSFER_MAX_ATTEMPTS", 5),
-                intOf(env, "TRANSFER_RETRY_BASE_MILLIS", 5));
+                intOf(env, "TRANSFER_RETRY_BASE_MILLIS", 5),
+                Boolean.parseBoolean(env.getOrDefault("RISK_ENABLED", "true")),
+                optionalIntOf(env, "RISK_RULESET_VERSION"));
     }
 
     /** Pessimistic locking unless LOCK_STRATEGY says otherwise. A name that is not recognised stops the start. */
@@ -43,6 +47,12 @@ public record Config(
             return LockStrategyKind.PESSIMISTIC;
         }
         return LockStrategyKind.parse(value);
+    }
+
+    /** Null when the variable is not set: the newest bundled rule set is used. */
+    private static Integer optionalIntOf(Map<String, String> env, String name) {
+        String value = env.get(name);
+        return value == null || value.isBlank() ? null : intOf(env, name, 0);
     }
 
     private static int intOf(Map<String, String> env, String name, int fallback) {

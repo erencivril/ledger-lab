@@ -5,6 +5,10 @@ import dev.erencivril.ledger.domain.Currency;
 import dev.erencivril.ledger.domain.FxRate;
 import dev.erencivril.ledger.domain.Money;
 import dev.erencivril.ledger.domain.Transfer;
+import dev.erencivril.ledger.domain.TransferStatus;
+import dev.erencivril.ledger.domain.risk.RiskDecision;
+import dev.erencivril.ledger.domain.risk.RuleSet;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +37,10 @@ public final class Ports {
         IdempotencyRepository idempotency();
 
         FxRateRepository fxRates();
+
+        RiskRepository risk();
+
+        RuleSetRepository ruleSets();
     }
 
     public interface AccountRepository {
@@ -65,12 +73,20 @@ public final class Ports {
         Money credit(UUID id, Money amount);
 
         Map<Currency, UUID> treasuryIds();
+
+        Map<Currency, UUID> holdIds();
     }
 
     public interface TransferRepository {
         void insert(Transfer transfer);
 
         Optional<Transfer> find(UUID id);
+
+        /** SELECT ... FOR UPDATE. Two people deciding on the same held transfer take turns. */
+        Optional<Transfer> findForUpdate(UUID id);
+
+        /** Moves a PENDING transfer to its final status and records when. */
+        void resolve(UUID id, TransferStatus status, Instant at);
     }
 
     public interface JournalRepository {
@@ -91,6 +107,48 @@ public final class Ports {
 
     public interface FxRateRepository {
         List<FxRate> findAll();
+    }
+
+    /** What the risk engine needs to know about the payee, read from the ledger. */
+    public record PayeeFacts(String ownerName, Instant openedAt, boolean paidBefore) {}
+
+    /** How much the sender has paid recently. {@code averageAmount} is in the sender's currency, null when {@code count} is 0. */
+    public record SenderHistory(int count, BigDecimal averageAmount) {}
+
+    /** One row of the risk_decisions audit table. {@code transferId} is null when no transfer was created. */
+    public record NewRiskDecision(
+            UUID id,
+            UUID transferId,
+            UUID sourceAccountId,
+            UUID destinationAccountId,
+            Money amount,
+            BigDecimal amountUsd,
+            RiskDecision decision,
+            boolean stepUpConfirmed,
+            boolean firstPayment,
+            long payeeAgeSeconds,
+            Instant createdAt) {}
+
+    public interface RiskRepository {
+        /** Empty when the payee account does not exist (the transfer will then fail with a normal 404). */
+        Optional<PayeeFacts> payeeFacts(UUID senderId, UUID payeeId);
+
+        /** Completed payments by the sender since {@code since}. */
+        SenderHistory senderHistory(UUID senderId, Instant since);
+
+        void insertDecision(NewRiskDecision decision);
+
+        Optional<RiskDecision> findDecision(UUID transferId);
+    }
+
+    /** A rule set as stored, with the hash of the file it was loaded from. */
+    public record StoredRuleSet(RuleSet ruleSet, String contentSha256) {}
+
+    public interface RuleSetRepository {
+        Optional<StoredRuleSet> find(int version);
+
+        /** Does nothing if the version exists already. */
+        void insertIfAbsent(RuleSet ruleSet, String contentSha256);
     }
 
     /** An account together with the version it had when it was read. */

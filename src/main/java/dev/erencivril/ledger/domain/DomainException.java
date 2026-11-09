@@ -63,6 +63,13 @@ public abstract sealed class DomainException extends RuntimeException {
         }
     }
 
+    /** Release or reject was asked for a transfer that is not waiting for a decision. */
+    public static final class TransferNotPending extends DomainException {
+        public TransferNotPending(UUID transferId, TransferStatus status) {
+            super("transfer_not_pending", "Transfer " + transferId + " is " + status + ", not PENDING");
+        }
+    }
+
     /** Raised when a journal does not sum to zero. That is a bug in the caller, not a client error. */
     public static final class UnbalancedJournal extends DomainException {
         public UnbalancedJournal(Currency currency) {

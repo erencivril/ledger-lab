@@ -73,6 +73,7 @@ dependencies {
     implementation "redis.clients:jedis:5.2.0"
     implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
     implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${jacksonVersion}"
+    implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${jacksonVersion}"
     implementation "org.slf4j:slf4j-api:2.0.20"
     runtimeOnly "ch.qos.logback:logback-classic:1.5.38"
 

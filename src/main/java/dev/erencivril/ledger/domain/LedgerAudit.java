@@ -3,6 +3,7 @@ package dev.erencivril.ledger.domain;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +20,8 @@ import java.util.UUID;
  *   <li>The balance recorded on each journal entry equals the replayed balance at that entry.
  *   <li>The stored balance of each customer account equals the replayed balance at the end.
  *   <li>Every journal entry belongs to an account that exists.
+ *   <li>In each currency, the hold accounts together hold exactly what the PENDING transfers took from
+ *       their senders: no more (money nobody can claim) and no less (money that was spent twice).
  * </ol>
  *
  * <p>The stress tests and the benchmark run this after every run, so it is the one definition of
@@ -35,7 +38,14 @@ public final class LedgerAudit {
     public record EntryRow(
             long id, UUID transferId, UUID accountId, Currency currency, BigDecimal amount, BigDecimal balanceAfter) {}
 
+    /** The ledger audit when no transfer is waiting on a hold. */
     public static List<String> violations(List<AccountRow> accounts, List<EntryRow> entries) {
+        return violations(accounts, entries, Map.of());
+    }
+
+    /** @param pendingByCurrency the total source amount of the PENDING transfers, per currency */
+    public static List<String> violations(
+            List<AccountRow> accounts, List<EntryRow> entries, Map<Currency, BigDecimal> pendingByCurrency) {
         List<String> problems = new ArrayList<>();
         Map<UUID, AccountRow> accountsById = new HashMap<>();
         for (AccountRow account : accounts) {
@@ -49,7 +59,30 @@ public final class LedgerAudit {
         checkEveryTransferBalances(inOrder, problems);
         Map<UUID, BigDecimal> replayed = replay(inOrder, accountsById, problems);
         checkStoredBalances(accounts, replayed, problems);
+        checkHolds(inOrder, accountsById, pendingByCurrency, problems);
         return problems;
+    }
+
+    private static void checkHolds(
+            List<EntryRow> inOrder,
+            Map<UUID, AccountRow> accountsById,
+            Map<Currency, BigDecimal> pendingByCurrency,
+            List<String> problems) {
+        Map<Currency, BigDecimal> held = new EnumMap<>(Currency.class);
+        for (EntryRow entry : inOrder) {
+            AccountRow account = accountsById.get(entry.accountId());
+            if (account != null && account.kind() == AccountKind.HOLD) {
+                held.merge(entry.currency(), entry.amount(), BigDecimal::add);
+            }
+        }
+        for (Currency currency : Currency.values()) {
+            BigDecimal inHold = held.getOrDefault(currency, BigDecimal.ZERO);
+            BigDecimal pending = pendingByCurrency.getOrDefault(currency, BigDecimal.ZERO);
+            if (inHold.compareTo(pending) != 0) {
+                problems.add("hold accounts hold " + inHold.toPlainString() + " " + currency
+                        + " but the pending transfers add up to " + pending.toPlainString() + " " + currency);
+            }
+        }
     }
 
     private static void checkEveryTransferBalances(List<EntryRow> inOrder, List<String> problems) {

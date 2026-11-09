@@ -24,6 +24,16 @@ public final class FxRateTable {
         return Optional.ofNullable(rates.get(new Pair(from, to)));
     }
 
+    /** The amount in USD, rounded to cents. A USD amount is returned unchanged. */
+    public Money toUsd(Money money) {
+        if (money.currency() == Currency.USD) {
+            return money;
+        }
+        FxRate rate = find(money.currency(), Currency.USD)
+                .orElseThrow(() -> new DomainException.NoFxRate(money.currency(), Currency.USD));
+        return rate.convert(money);
+    }
+
     public int size() {
         return rates.size();
     }

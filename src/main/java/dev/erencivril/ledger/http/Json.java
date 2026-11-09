@@ -80,6 +80,17 @@ final class Json {
         return node == null || node.isNull() ? null : decimal(node, field);
     }
 
+    static boolean optionalBoolean(JsonNode body, String field) {
+        JsonNode node = body.get(field);
+        if (node == null || node.isNull()) {
+            return false;
+        }
+        if (!node.isBoolean()) {
+            throw new BadRequest("invalid_field", "'" + field + "' must be true or false");
+        }
+        return node.asBoolean();
+    }
+
     private static BigDecimal decimal(JsonNode node, String field) {
         if (node.isNumber()) {
             return node.decimalValue();

@@ -11,5 +11,7 @@ Short notes on the choices that shape the code: what was decided, why, what it c
 | [0005](0005-redis-trust-boundary.md) | Redis is never trusted for correctness |
 | [0006](0006-sparkjava-behind-a-thin-routing-layer.md) | SparkJava stays, behind a thin routing layer, with a known exit path |
 | [0007](0007-outbox-instead-of-saga.md) | A transactional outbox, not a saga, for anything that must follow a transfer |
+| [0008](0008-risk-engine-in-the-domain.md) | The risk engine is pure domain code and its rules are versioned data |
+| [0009](0009-holds-use-a-hold-account.md) | A held transfer moves the money into a hold account |
 
 Each file has the same sections: Status, Context, Decision, Consequences, Evidence.

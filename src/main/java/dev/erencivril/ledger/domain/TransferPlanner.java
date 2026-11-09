@@ -2,6 +2,7 @@ package dev.erencivril.ledger.domain;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -15,10 +16,17 @@ public final class TransferPlanner {
 
     private final FxRateTable rates;
     private final TreasuryAccounts treasury;
+    private final HoldAccounts holds;
 
+    /** A planner that cannot hold transfers: asking it to throws. */
     public TransferPlanner(FxRateTable rates, TreasuryAccounts treasury) {
+        this(rates, treasury, new HoldAccounts(Map.of()));
+    }
+
+    public TransferPlanner(FxRateTable rates, TreasuryAccounts treasury, HoldAccounts holds) {
         this.rates = rates;
         this.treasury = treasury;
+        this.holds = holds;
     }
 
     /**
@@ -60,21 +68,77 @@ public final class TransferPlanner {
             return new TransferPlan(amount, amount, null, journal, debited.balance(), destination.credit(amount).balance());
         }
 
-        FxRate rate = rates.find(source.currency(), destination.currency())
-                .orElseThrow(() -> new DomainException.NoFxRate(source.currency(), destination.currency()));
+        FxRate rate = rateFor(source.currency(), destination.currency());
+        Money converted = convert(rate, amount, destination.currency());
+        Journal journal = new Journal(crossCurrencyLines(source.id(), destination.id(), amount, converted));
+        return new TransferPlan(
+                amount, converted, rate.rate(), journal, debited.balance(), destination.credit(converted).balance());
+    }
+
+    private FxRate rateFor(Currency from, Currency to) {
+        return rates.find(from, to).orElseThrow(() -> new DomainException.NoFxRate(from, to));
+    }
+
+    private static Money convert(FxRate rate, Money amount, Currency to) {
         Money converted = rate.convert(amount);
         if (converted.isZero()) {
             throw new DomainException.InvalidAmount(
-                    amount + " converts to zero " + destination.currency() + " and cannot be transferred");
+                    amount + " converts to zero " + to + " and cannot be transferred");
         }
-        // Each currency balances on its own: the customer side is mirrored by the treasury account.
-        Journal journal = new Journal(List.of(
-                new JournalLine(source.id(), amount.negate()),
+        return converted;
+    }
+
+    /**
+     * Each currency balances on its own: the customer side is mirrored by the treasury account. {@code from}
+     * is the account that gives {@code amount}; for a direct transfer that is the sender, for a release it is
+     * the hold account.
+     */
+    private List<JournalLine> crossCurrencyLines(UUID from, UUID to, Money amount, Money converted) {
+        return List.of(
+                new JournalLine(from, amount.negate()),
                 new JournalLine(treasury.idFor(amount.currency()), amount),
                 new JournalLine(treasury.idFor(converted.currency()), converted.negate()),
-                new JournalLine(destination.id(), converted)));
-        return new TransferPlan(
-                amount, converted, rate.rate(), journal, debited.balance(), destination.credit(converted).balance());
+                new JournalLine(to, converted));
+    }
+
+    /**
+     * Takes the money out of the sender and parks it in the hold account of the same currency. The sender
+     * must be able to pay now, and the conversion that the release will need is worked out and frozen now,
+     * so a release cannot fail later because of the rate table.
+     */
+    public HoldPlan planHold(Account source, Account destination, Money amount) {
+        validate(source, destination, amount);
+        Account debited = source.debit(amount);
+        Money destinationAmount = amount;
+        BigDecimal fxRate = null;
+        if (source.currency() != destination.currency()) {
+            FxRate rate = rateFor(source.currency(), destination.currency());
+            destinationAmount = convert(rate, amount, destination.currency());
+            fxRate = rate.rate();
+        }
+        Journal journal = new Journal(List.of(
+                new JournalLine(source.id(), amount.negate()),
+                new JournalLine(holds.idFor(amount.currency()), amount)));
+        return new HoldPlan(amount, destinationAmount, fxRate, journal, debited.balance());
+    }
+
+    /** Pays the destination from the hold account, using the amounts frozen when the transfer was held. */
+    public ReleasePlan planRelease(Transfer transfer, Account destination) {
+        Money held = transfer.sourceAmount();
+        Money payout = transfer.destinationAmount();
+        UUID holdAccount = holds.idFor(held.currency());
+        List<JournalLine> lines = held.currency() == payout.currency()
+                ? List.of(new JournalLine(holdAccount, held.negate()), new JournalLine(destination.id(), payout))
+                : crossCurrencyLines(holdAccount, destination.id(), held, payout);
+        return new ReleasePlan(new Journal(lines), destination.credit(payout).balance());
+    }
+
+    /** Gives the held money back to the sender. */
+    public ReleasePlan planReject(Transfer transfer, Account source) {
+        Money held = transfer.sourceAmount();
+        Journal journal = new Journal(List.of(
+                new JournalLine(holds.idFor(held.currency()), held.negate()), new JournalLine(source.id(), held)));
+        return new ReleasePlan(journal, source.credit(held).balance());
     }
 
     /** The journal for funding a new account: the treasury pays, the account receives. */
