@@ -53,7 +53,7 @@ class CanonicalReplayRegressionSpec extends Specification {
     def "committed risk requests bind name and confirmation, not decimal spelling"() {
         given:
         def api = new ApiClient(RISK_ENABLED: true)
-        def a = api.createAccount('USD', '1000.00')
+        def a = api.createAccount('USD', '10000.00')
         def b = api.createAccount('USD', null, 'ordinary')
         def k = UUID.randomUUID().toString()
         def body = [sourceAccountId: a, destinationAccountId: b, amount: amount, currency: 'USD', payeeName: 'ordinary']
@@ -66,7 +66,7 @@ class CanonicalReplayRegressionSpec extends Specification {
         def confirmation = api.post('/transfers', body + [stepUpConfirmed: true], headers)
 
         then:
-        first.status == 201
+        first.status == (status == 'PENDING' ? 202 : 201)
         first.body.status == status
         same.status == 200
         same.body == first.body
@@ -79,6 +79,6 @@ class CanonicalReplayRegressionSpec extends Specification {
         where:
         amount   | status
         '1.00'   | 'COMPLETED'
-        '150.00' | 'PENDING'
+        '1500.00' | 'PENDING'
     }
 }

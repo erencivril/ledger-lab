@@ -57,6 +57,7 @@ class TransferServiceSpec extends Specification {
 
         then:
         1 * cache.get('key-1') >> Optional.of(new CachedKey(fingerprint, stored.id()))
+        1 * idempotency.find('key-1') >> Optional.of(new IdempotencyRecord('key-1', fingerprint, stored.id()))
         1 * transfers.find(stored.id()) >> Optional.of(stored)
         0 * limiter.acquire(_)
         0 * idempotency.tryClaim(_, _)
@@ -65,7 +66,7 @@ class TransferServiceSpec extends Specification {
         result.transfer() == stored
     }
 
-    def "a cache hit for a different request is a conflict without touching the database"() {
+    def "a different request conflicts against the canonical database binding"() {
         given:
         def other = new TransferService.TransferCommand('key-1', from.id(), to.id(), usd('26.00'))
 
@@ -74,6 +75,7 @@ class TransferServiceSpec extends Specification {
 
         then:
         1 * cache.get('key-1') >> Optional.of(new CachedKey(fingerprint, stored.id()))
+        1 * idempotency.find('key-1') >> Optional.of(new IdempotencyRecord('key-1', fingerprint, stored.id()))
         thrown(ApplicationException.IdempotencyKeyReused)
         0 * limiter.acquire(_)
         0 * transfers.find(_)
@@ -86,7 +88,6 @@ class TransferServiceSpec extends Specification {
 
         then:
         1 * cache.get('key-1') >> Optional.of(new CachedKey(fingerprint, stored.id()))
-        1 * transfers.find(stored.id()) >> Optional.empty()
         1 * idempotency.find('key-1') >> Optional.of(new IdempotencyRecord('key-1', fingerprint, stored.id()))
         1 * transfers.find(stored.id()) >> Optional.of(stored)
         result.replayed()

@@ -175,6 +175,7 @@ class TransferServiceRiskSpec extends Specification {
 
         then:
         1 * cache.get('key-1') >> Optional.of(new CachedKey(command.fingerprint(), stored.id()))
+        1 * idempotency.find('key-1') >> Optional.of(new IdempotencyRecord('key-1', command.fingerprint(), stored.id()))
         1 * transfers.find(stored.id()) >> Optional.of(stored)
         1 * riskRepo.findDecision(stored.id()) >> Optional.of(decision)
         0 * risk.assess(_)
@@ -182,9 +183,9 @@ class TransferServiceRiskSpec extends Specification {
         result.risk() == decision
     }
 
-    def "stepUpConfirmed is part of the request but not of the idempotency fingerprint"() {
+    def "stepUpConfirmed is part of committed request identity"() {
         expect:
-        new TransferService.TransferCommand('k', from.id(), to.id(), usd('1.00'), true).fingerprint() ==
+        new TransferService.TransferCommand('k', from.id(), to.id(), usd('1.00'), true).fingerprint() !=
                 new TransferService.TransferCommand('k', from.id(), to.id(), usd('1.00'), false).fingerprint()
     }
 

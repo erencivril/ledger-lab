@@ -127,9 +127,16 @@ public final class TransferService {
             this(idempotencyKey, sourceAccountId, destinationAccountId, amount, stepUpConfirmed, null);
         }
 
+        // Exact supplied name is identity: null, empty and whitespace are distinct. Confirmation
+        // is identity too; a refused STEP_UP never claims the key, so confirmation can retry it.
+        private static String framed(String value) {
+            return value == null ? "-1:" : value.length() + ":" + value;
+        }
+
         String fingerprint() {
-            String canonical = sourceAccountId + "|" + destinationAccountId + "|" + amount.amount().toPlainString()
-                    + "|" + amount.currency();
+            String canonical = framed(sourceAccountId.toString()) + framed(destinationAccountId.toString())
+                    + framed(amount.amount().toPlainString()) + framed(amount.currency().name())
+                    + framed(payeeName) + framed(Boolean.toString(stepUpConfirmed));
             try {
                 byte[] hash = MessageDigest.getInstance("SHA-256").digest(canonical.getBytes(StandardCharsets.UTF_8));
                 return HexFormat.of().formatHex(hash);
@@ -225,16 +232,14 @@ public final class TransferService {
 
     private Optional<TransferResult> findReplay(String key, String fingerprint) {
         Optional<CachedKey> cached = cache.get(key);
-        if (cached.isPresent()) {
-            requireSameRequest(key, fingerprint, cached.get().fingerprint());
-            Optional<TransferResult> result = unitOfWork.execute(tx ->
-                    tx.transfers().find(cached.get().transferId()).map(transfer -> replayResult(tx, transfer)));
-            if (result.isPresent()) {
-                return result;
+        // Redis is only a hint. Even an existing transfer ID proves no ownership of this key.
+        return unitOfWork.execute(tx -> tx.idempotency().find(key).map(record -> {
+            if (cached.isPresent() && (!cached.get().fingerprint().equals(record.fingerprint())
+                    || !cached.get().transferId().equals(record.transferId()))) {
+                log.warn("Ignoring inconsistent idempotency cache hint for key {}", key);
             }
-            log.warn("Idempotency cache points at a missing transfer for key {}; falling back to Postgres", key);
-        }
-        return unitOfWork.execute(tx -> tx.idempotency().find(key).map(record -> replayOf(tx, record, fingerprint)));
+            return replayOf(tx, record, fingerprint);
+        }));
     }
 
     private TransferResult executeInTransaction(

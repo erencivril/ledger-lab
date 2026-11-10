@@ -192,8 +192,9 @@ class RedisBehaviourIntegrationSpec extends Specification {
         redis.set("idem:$key", "garbage:${UUID.randomUUID()}")
         def stale = api.transfer(key, a, b, '1.00')
 
-        then: 'the fingerprint differs from the request, so it is refused rather than trusted'
-        stale.status == 409
+        then: 'Postgres wins even when the cached fingerprint differs'
+        stale.status == 200
+        stale.body == first.body
 
         when: 'the cache has the right fingerprint but a missing transfer'
         def fingerprint = redis.get("idem:$key").split(':')[0]
