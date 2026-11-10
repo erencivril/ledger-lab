@@ -1,6 +1,6 @@
 # 0007. A transactional outbox, not a saga, for anything that must follow a transfer
 
-Status: accepted. Not built yet; this records the direction.
+Status: accepted. Implemented for the local risk read model; external delivery remains out of scope.
 
 ## Context
 
@@ -24,4 +24,4 @@ A saga is not needed because there is no multi-service transaction to coordinate
 
 ## Evidence
 
-Nothing yet; no outbox code exists. This record exists so the choice is made before the code, and so the reasoning can be checked against the tests when it is built.
+Implemented for the local risk read model by migration V12 and `RiskFeatureProjector`; see [ADR 0010](0010-poll-the-transactional-outbox.md) and `OutboxIntegrationSpec`. Projection, deduplication and acknowledgement commit together. External delivery, backlog monitoring and retention remain outside this learning example.

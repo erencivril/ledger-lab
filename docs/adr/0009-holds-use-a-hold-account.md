@@ -12,8 +12,8 @@ Use the ledger hold pattern. There is one `HOLD` account per currency. Placing a
 
 - The hold account has no stored balance, like the treasury. Its balance is the sum of its entries, and the audit checks that it equals the sum of the `PENDING` transfers.
 - A cross-currency hold works out the conversion and freezes it on the transfer row when the hold is placed. Release pays exactly that amount. A release cannot fail because the rate table changed or a rate is missing.
-- Release and reject lock the transfer row (`SELECT ... FOR UPDATE`) first, then the one customer account they change. Two people deciding at once take turns and the second sees a transfer that is no longer `PENDING`, which is a `409 transfer_not_pending`. One lock order, one customer row: no deadlock.
-- Holds lock the sender with `FOR UPDATE` whichever strategy is configured for ordinary transfers. They are rare and one row cannot deadlock, so a fourth strategy is not worth the code.
+- Release and reject lock the transfer row (`SELECT ... FOR UPDATE`) first, then the one customer account they change. Two people deciding at once take turns and the second sees a transfer that is no longer `PENDING`, which is a `409 transfer_not_pending`. This serialises decisions on one hold; placement separately follows the two-account ordering protocol.
+- Placement locks BOTH source and destination with `FOR UPDATE` in the shared ascending UUID order, whichever ordinary strategy is configured. Transfer insertion implicitly takes foreign-key key-share locks on both accounts: locking only the sender can deadlock even though only its balance changes. `HoldLockRegressionSpec` forces opposite HOLD and mixed ordinary/HOLD schedules without sleeps and checks for zero `40P01`, not merely eventual retry success.
 - A payee only counts as "known" after a `COMPLETED` payment. A held or rejected one proves nothing.
 - The HTTP answer for a held transfer is `202`. The money has left the sender, the payee has not been paid.
 

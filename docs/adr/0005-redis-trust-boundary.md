@@ -11,7 +11,7 @@ Redis is fast and convenient, and it can be empty, stale, wrong, or down. Money 
 Redis does two jobs, and neither affects whether money is right.
 
 1. **Velocity limit.** A sliding window per source account, in a sorted set updated by one Lua script, so the check and the update are atomic across application instances. The script uses the Redis clock. It is a risk control, not an integrity control. If Redis is down the limiter lets the transfer through and logs a warning (`VELOCITY_FAIL_OPEN=true`, the default). `VELOCITY_FAIL_OPEN=false` refuses the transfer instead.
-2. **Idempotency cache.** After a transfer commits, `idem:<key>` is written with a 24 hour expiry, so a replay can skip one query. A miss, a stale entry, garbage, or Redis being down all fall back to PostgreSQL. A cache entry is used only when its stored request fingerprint matches, and it only ever points at a transfer that is then loaded from PostgreSQL. Nothing is created or moved because of what Redis says.
+2. **Idempotency cache.** After a transfer commits, `idem:<key>` is written with a 24 hour expiry as a hint. Every replay loads the canonical PostgreSQL key binding and compares the request fingerprint there. Redis hash mismatches do not decide conflicts, and neither a valid unrelated transfer ID nor a forged unclaimed key can substitute another result. The canonical lookup is deliberately never skipped. Nothing is created or moved because of what Redis says.
 
 The rule behind both: Redis may make a request cheaper or may reject one early. It may never make a request succeed, and never decide which transfer a key refers to.
 
