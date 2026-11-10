@@ -23,6 +23,8 @@ class RequestIdentityRegressionSpec extends Specification {
         'A|B'  | 'A:B'
         'Alice'| 'Bob'
         'ALICE'| 'Alice'
+        'é'    | 'e' + (char) 0x0301
+        'A' + new String(Character.toChars(0x1f600)) | 'A' + new String(Character.toChars(0x1f601))
     }
 
     def "command rejects malformed UTF-16 before it can be fingerprinted"() {

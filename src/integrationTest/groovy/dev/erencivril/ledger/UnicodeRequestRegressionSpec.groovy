@@ -8,12 +8,27 @@ import groovy.sql.Sql
 import spock.lang.Specification
 
 class UnicodeRequestRegressionSpec extends Specification {
+    @spock.lang.Shared String database = 'unicode_' + UUID.randomUUID().toString().replace('-', '')
+    def adminSql() { Sql.newInstance(Infra.jdbcUrl(), Infra.POSTGRES.username, Infra.POSTGRES.password, 'org.postgresql.Driver') }
+    def jdbcUrl() { Infra.jdbcUrl().replace('/' + Infra.POSTGRES.databaseName, '/' + database) }
+    def setupSpec() {
+        def admin = adminSql()
+        try { admin.execute('CREATE DATABASE ' + database) } finally { admin.close() }
+    }
+    def cleanupSpec() {
+        def admin = adminSql()
+        try { admin.execute('DROP DATABASE ' + database) } finally { admin.close() }
+    }
     def redis = RedisClients.connect(Infra.redisUrl())
-    def sql = Sql.newInstance(Infra.jdbcUrl(), Infra.POSTGRES.username, Infra.POSTGRES.password, 'org.postgresql.Driver')
+    def sql = Sql.newInstance(jdbcUrl(), Infra.POSTGRES.username, Infra.POSTGRES.password, 'org.postgresql.Driver')
     def cleanup() { sql.close(); redis.close() }
 
     // Compare complete persisted rows, including balances, claims, audit, features and outbox.
     def databaseState() {
+        // Completed payments project asynchronously; drain their committed outbox before comparing.
+        new spock.util.concurrent.PollingConditions(timeout: 10).eventually {
+            assert sql.firstRow('select count(*) c from risk_outbox where processed_at is null').c == 0
+        }
         sql.rows("select tablename from pg_tables where schemaname = 'public' order by tablename")
                 .collectEntries { row ->
                     def table = row.tablename
@@ -29,7 +44,7 @@ class UnicodeRequestRegressionSpec extends Specification {
 
     def "malformed #escape cannot replay a #status transfer or change any state"() {
         given:
-        def api = new ApiClient(RISK_ENABLED: true)
+        def api = new ApiClient(RISK_ENABLED: true, DATABASE_URL: jdbcUrl())
         def a = api.createAccount('USD', '10000.00')
         def b = api.createAccount('USD', null, 'Alice Smith')
         def headers = ['Idempotency-Key': UUID.randomUUID().toString()]
@@ -74,7 +89,7 @@ class UnicodeRequestRegressionSpec extends Specification {
 
     def "valid supplementary names are accepted and retain exact identity for #status"() {
         given:
-        def api = new ApiClient(RISK_ENABLED: true)
+        def api = new ApiClient(RISK_ENABLED: true, DATABASE_URL: jdbcUrl())
         def name = 'Alİce ' + new String(Character.toChars(0x1f600)) + ' Smith'
         def a = api.createAccount('USD', '10000.00')
         def b = api.createAccount('USD', null, name)
@@ -106,7 +121,7 @@ class UnicodeRequestRegressionSpec extends Specification {
 
     def "fresh malformed name #escape has no side effects and leaves the key usable"() {
         given:
-        def api = new ApiClient(RISK_ENABLED: true)
+        def api = new ApiClient(RISK_ENABLED: true, DATABASE_URL: jdbcUrl())
         def a = api.createAccount('USD', '100.00')
         def b = api.createAccount('USD', null, 'Alice Smith')
         def headers = ['Idempotency-Key': UUID.randomUUID().toString()]
@@ -133,7 +148,7 @@ class UnicodeRequestRegressionSpec extends Specification {
 
     def "required owner text rejects malformed #escape before persistence"() {
         given:
-        def api = new ApiClient()
+        def api = new ApiClient(DATABASE_URL: jdbcUrl())
         def dbBefore = databaseState()
         def redisBefore = redisState()
 

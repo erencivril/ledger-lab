@@ -37,6 +37,12 @@ public abstract sealed class DomainException extends RuntimeException {
         }
     }
 
+    public static final class InvalidText extends DomainException {
+        public InvalidText(String field) {
+            super("invalid_text", "'" + field + "' must be well-formed Unicode");
+        }
+    }
+
     public static final class InvalidOwner extends DomainException {
         public InvalidOwner(String message) {
             super("invalid_owner", message);

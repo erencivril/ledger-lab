@@ -35,6 +35,7 @@ public record ApiError(int status, String code, String message, Long retryAfterS
             case DomainException.InvalidAmount x -> of(400, x.code(), x.getMessage());
             case DomainException.UnsupportedCurrency x -> of(400, x.code(), x.getMessage());
             case DomainException.InvalidOwner x -> of(400, x.code(), x.getMessage());
+            case DomainException.InvalidText x -> of(400, x.code(), x.getMessage());
             case DomainException.SameAccount x -> of(422, x.code(), x.getMessage());
             case DomainException.InsufficientFunds x -> of(422, x.code(), x.getMessage());
             case DomainException.CurrencyMismatch x -> of(422, x.code(), x.getMessage());

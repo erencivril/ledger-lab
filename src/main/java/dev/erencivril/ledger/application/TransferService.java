@@ -114,6 +114,11 @@ public final class TransferService {
             Money amount,
             boolean stepUpConfirmed, String payeeName) {
 
+        public TransferCommand {
+            // UTF-8 replacement of unpaired surrogates would alias distinct supplied names.
+            dev.erencivril.ledger.domain.Text.requireWellFormed(payeeName, "payeeName");
+        }
+
         public TransferCommand(String idempotencyKey, UUID sourceAccountId, UUID destinationAccountId, Money amount) {
             this(idempotencyKey, sourceAccountId, destinationAccountId, amount, false, null);
         }

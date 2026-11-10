@@ -51,6 +51,7 @@ final class Json {
         if (!node.isTextual()) {
             throw new BadRequest("invalid_field", "'" + field + "' must be a string");
         }
+        dev.erencivril.ledger.domain.Text.requireWellFormed(node.asText(), field);
         return node.asText();
     }
 
@@ -86,6 +87,7 @@ final class Json {
         if (!node.isTextual() || node.asText().length() > 200) {
             throw new BadRequest("invalid_field", "'" + field + "' must be text of at most 200 characters");
         }
+        dev.erencivril.ledger.domain.Text.requireWellFormed(node.asText(), field);
         return node.asText();
     }
 
