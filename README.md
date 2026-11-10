@@ -104,7 +104,7 @@ A consequence worth knowing: a transfer that is rejected (insufficient funds, un
 
 ### What Redis is and is not trusted for
 
-Redis does two jobs and neither affects correctness.
+The original Redis throttle and cache do not establish ledger correctness. The risk velocity windows described below add a separate HOLD-on-unavailability policy.
 
 1. **Velocity limit.** A sliding window per source account, kept in a sorted set and updated by one Lua script so the check and the update are atomic across app instances. The script uses the Redis clock. The default is 10 transfers per 60 seconds, set with `VELOCITY_MAX_TRANSFERS` and `VELOCITY_WINDOW_SECONDS`. The next one gets `429` with code `velocity_limit_exceeded` and a `Retry-After` header. The limit counts attempts that get past the idempotency lookup, so a replay of a finished transfer is free, but a transfer later rejected for insufficient funds still counts. If Redis is down the limiter lets the transfer through and logs a warning (`VELOCITY_FAIL_OPEN=false` makes it refuse the transfer instead). I chose fail-open because the ledger is correct without this rule; it is a risk control, not an integrity control.
 2. **Idempotency cache.** After a transfer commits, `idem:<key>` is written with a 24 hour expiry so a replay can skip one query. A miss, a stale entry, garbage, or Redis being down all fall back to PostgreSQL. A cache entry is only used when its stored request hash matches the new request, and it only ever points at a transfer that is looked up in PostgreSQL. Nothing is ever created or moved because of what Redis says. Tests delete entries, poison them, and point the app at a Redis that is not there.
@@ -159,6 +159,10 @@ Actual output with seed 42, 10,000 observations, k=100:
 A positive prediction means STEP_UP, HOLD or BLOCK. WARN is not an intervention. TP is a labelled harmful payment caught, FP a normal one interrupted, TN a normal one left alone, FN a harmful one missed. Precision is `TP / (TP + FP)`; recall is `TP / (TP + FN)`. Precision@k is the harmful share of the first k observations in a review queue ranked by action severity, then number of triggered rules, then sample id for ties. There is no calibrated risk probability. Undefined ratios print `NaN`, and k is clamped to the dataset size.
 
 Version 2 catches more of the injected patterns, but also interrupts more normal payments. Its precision here is under 50%. The high precision@100 comes from the artificial distributions and ranking, not proof of quality on real payments. Changing the seed or the distributions changes these numbers.
+
+## Public-rules reimbursement example
+
+`ReimbursementCalculator` is a pure Java GBP arithmetic example, separate from the API. It handles explicitly supported excess, cap and externally established exception cases. A single-receiving-PSP 50:50 split is returned only for the documented maximum-excess scenario; an absent split is not zero liability. It does not assess eligibility or implement regulatory compliance. See [the walkthrough, limitations and PSR sources read on 2026-11-10](docs/reimbursement.md).
 
 ## API
 
@@ -247,9 +251,9 @@ make benchmark    # the three lock strategies compared (needs Docker, about 7 mi
 make check        # unit + integration
 ```
 
-**Unit specs (Spock 2 on Groovy 4).** 274 test results. The domain is tested with data tables: rounding at 0, 2 and 3 decimals including the exact half-way cases, FX conversion, every validation rule, balanced and unbalanced journals, and every kind of damage `LedgerAudit` must notice. Each strategy and the retry loop are tested with mocked ports, including lock order and the waits between attempts. An ArchUnit spec guards the layering.
+**Unit specs (Spock 2 on Groovy 4).** 488 test results. The domain is tested with data tables: rounding at 0, 2 and 3 decimals including the exact half-way cases, FX conversion, every validation rule, balanced and unbalanced journals, and every kind of damage `LedgerAudit` must notice. Each strategy and the retry loop are tested with mocked ports, including lock order and the waits between attempts. An ArchUnit spec guards the layering.
 
-**Integration specs.** 105 test results against real PostgreSQL and Redis. They cover the repositories through the services, the whole HTTP API, idempotent replays, 20 parallel requests with one key (exactly one transfer), rollback of rejected transfers, the database-level guards, the Redis limiter and Redis being wrong, empty or unreachable. Every spec that writes money ends by running the ledger audit over the whole database.
+**Integration specs.** 147 test results against real PostgreSQL and Redis. They cover the repositories through the services, the whole HTTP API, idempotent replays, 20 parallel requests with one key (exactly one transfer), rollback of rejected transfers, the database-level guards, the Redis limiter and Redis being wrong, empty or unreachable. Every spec that writes money ends by running the ledger audit over the whole database.
 
 - **Stress, per strategy** (`StrategyStressIntegrationSpec`): randomized transfers across many accounts with a hot account on 32 threads; 400 transfers in both directions between two accounts; 300 requests of 1.00 against 100.00 (exactly 100 win). Each ends with the audit.
 - **Failure modes** (`FailureModesIntegrationSpec`, [docs/failure-modes.md](docs/failure-modes.md)): a crash mid-transfer, a lost response after commit, a deadlock, and PostgreSQL going down and coming back.
@@ -258,7 +262,7 @@ make check        # unit + integration
 
 The original concurrency test still runs: 32 threads, 400 transfers in both directions between two accounts, 400 succeeded, no deadlocks, money conserved. Numbers are from a 2-vCPU VPS with PostgreSQL in Docker; read them as "it works under contention", not as a benchmark. For comparisons see [docs/benchmarks.md](docs/benchmarks.md), reproduced with `make benchmark`.
 
-**Mutation testing (PIT).** PIT changes the domain code (flips a condition, removes a call, changes a return value) and checks that a test fails. It runs on `dev.erencivril.ledger.domain` with the `STRONGER` mutator set and the JUnit 5 plugin so Spock specs are run. Last run: 122 mutants, 122 killed, including `LedgerAudit` and the planner variant used by the atomic strategy. The build fails below a 90% threshold, set in `build.gradle`. CI uploads the HTML report as an artifact and writes the score and any surviving mutants to the run summary.
+**Mutation testing (PIT).** PIT changes the domain code (flips a condition, removes a call, changes a return value) and checks that a test fails. It runs on `dev.erencivril.ledger.domain` with the `STRONGER` mutator set and the JUnit 5 plugin so Spock specs are run. Local JDK 21 run on 2026-11-10: 348 mutants, 336 killed (96.55%), including 29/29 in the reimbursement calculator. The domain includes risk rules and ledger invariants; 10 mutants survived and 2 had no coverage. The build fails below a 90% threshold, set in `build.gradle`. CI uploads the HTML report as an artifact and writes the score and any surviving mutants to the run summary.
 
 On its first runs PIT reported two survivors. The treasury map's defensive copy was never tested, and the currency check in `TransferPlanner` was hidden behind a similar check inside `Money`, so a loose assertion on the error message let the mutant live. Both became tests.
 
@@ -284,9 +288,9 @@ Gradle's build cache is off, so tests are never skipped as "from cache".
 - **FX is a fixed, illustrative table.** No live rates, no spread, no fees, no rate expiry. A rate and its inverse are not exact reciprocals. Only six currencies, as an enum.
 - **No reversals.** A completed transfer is final. Only a held transfer can be cancelled (rejected), and only before it is released.
 - **Idempotency keys are global and never expire.** They are not scoped to a client, and the table grows forever. A real service would scope keys per API client and delete old ones.
-- **Velocity limit is simple.** Per source account only, counts attempts, and fails open by default.
+- **Velocity policies differ.** The older HTTP throttle is per source account and defaults to fail-open. The risk 1h/24h attempt windows produce HOLD when their Redis store is unavailable. Neither is a global fraud model.
 - **SparkJava is unmaintained** (last release 2022). It is kept behind a thin routing layer with a named exit path, see [ADR 0006](docs/adr/0006-sparkjava-behind-a-thin-routing-layer.md); the image is scanned in CI.
-- **No outbox yet.** Anything that must follow a transfer (notifications, feeds) would use a transactional outbox, see [ADR 0007](docs/adr/0007-outbox-instead-of-saga.md). It is a decision, not code.
+- **Outbox scope is local.** The polling outbox feeds the risk read model in the same PostgreSQL database. There is no external message delivery, backlog monitoring or retention policy. See [ADR 0010](docs/adr/0010-poll-the-transactional-outbox.md).
 - **Single PostgreSQL.** Row locks serialise transfers that share an account, which is the point, but a very busy account is a hot row. Scaling beyond one database would need partitioning by account and a different approach to cross-shard transfers (for example a saga or a transfer state machine), which this project does not have.
 - **The treasury is the counterparty for FX and opening balances** and is not reconciled against anything external.
 - **Operational basics are missing:** no metrics, no tracing, no request ids, no OpenAPI file, no graceful drain on shutdown beyond stopping Jetty.
