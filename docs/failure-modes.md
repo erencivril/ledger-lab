@@ -28,6 +28,9 @@ Each row says what goes wrong, what the system does, what the client sees, and w
 
 | Redis down during risk assessment | The sliding-window count and amount cannot be read. The risk engine never treats this as zero. | `202 PENDING` with `VELOCITY_UNAVAILABLE`, money parked in the hold account. A replay still deduplicates via PostgreSQL. With the older per-minute throttle set fail-closed, it can instead refuse earlier with 503. | [`RiskSignalsIntegrationSpec`](../src/integrationTest/groovy/dev/erencivril/ledger/RiskSignalsIntegrationSpec.groovy): "risk enabled with Redis down parks money rather than paying unchecked" |
 
+| Crash during feature projection | Feature writes and outbox acknowledgement share a transaction. | All roll back together. The next poll retries; a repeated event does not increment aggregates twice. | [`OutboxIntegrationSpec`](../src/integrationTest/groovy/dev/erencivril/ledger/OutboxIntegrationSpec.groovy): "a projection failure rolls back deduplication, aggregates and acknowledgement together" |
+| Poller stopped or slow | The risk read model is behind the ledger. | History includes completed payments not yet projected, so it does not drop facts. Money paths do not wait for the poller. | Same file: "a stalled projection falls back to the ledger for risk facts" |
+
 ## What is not covered
 
 - A crash of PostgreSQL itself after it acknowledged a commit but before the disk write is PostgreSQL's durability guarantee (`fsync`, WAL). The specs do not test PostgreSQL's own recovery.

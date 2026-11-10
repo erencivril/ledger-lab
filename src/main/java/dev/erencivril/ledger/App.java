@@ -21,6 +21,7 @@ import dev.erencivril.ledger.http.LedgerRoutes;
 import dev.erencivril.ledger.persistence.Database;
 import dev.erencivril.ledger.persistence.JooqUnitOfWork;
 import dev.erencivril.ledger.persistence.PostgresHealthProbe;
+import dev.erencivril.ledger.persistence.RiskFeatureProjector;
 import dev.erencivril.ledger.risk.RuleSetLoader;
 import java.time.Clock;
 import java.util.List;
@@ -37,11 +38,13 @@ public final class App implements AutoCloseable {
     private final HikariDataSource dataSource;
     private final JedisPooled redis;
     private final Service http;
+    private final RiskFeatureProjector projector;
 
-    private App(HikariDataSource dataSource, JedisPooled redis, Service http) {
+    private App(HikariDataSource dataSource, JedisPooled redis, Service http, RiskFeatureProjector projector) {
         this.dataSource = dataSource;
         this.redis = redis;
         this.http = http;
+        this.projector = projector;
     }
 
     public static App start(Config config) {
@@ -94,7 +97,9 @@ public final class App implements AutoCloseable {
                 config.velocityMaxTransfers(),
                 config.velocityWindowSeconds(),
                 config.velocityFailOpen());
-        return new App(dataSource, redis, http);
+        RiskFeatureProjector projector = new RiskFeatureProjector(dataSource);
+        projector.start();
+        return new App(dataSource, redis, http, projector);
     }
 
     /** Loads the bundled rule sets into the database and builds the engine for the configured version. */
@@ -118,6 +123,7 @@ public final class App implements AutoCloseable {
     public void close() {
         http.stop();
         http.awaitStop();
+        projector.close();
         redis.close();
         dataSource.close();
     }

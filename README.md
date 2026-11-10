@@ -136,6 +136,8 @@ Rules live in YAML, are loaded into PostgreSQL as a numbered version, and a publ
 
 `LedgerAudit` stays true while transfers wait: the hold account has no stored balance, and the audit checks that its entries add up to the pending transfers. A crash between the hold and the decision loses nothing, see [docs/failure-modes.md](docs/failure-modes.md).
 
+The risk history has a small CQRS read model: `risk_features_payments`, `risk_features_sender`, and `risk_features_payee`. Completed payments append to a transactional outbox in PostgreSQL. A polling worker uses `FOR UPDATE SKIP LOCKED` and commits projection and acknowledgement together. Redelivery is idempotent by transfer id. Unprojected payments are included directly from the ledger when risk history is read, so a stopped poller does not hide recent payments. See [ADR 0010](docs/adr/0010-poll-the-transactional-outbox.md).
+
 ## API
 
 Amounts are strings. Errors are always `{"code": "...", "message": "..."}`.

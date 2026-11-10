@@ -14,7 +14,7 @@ class OutboxIntegrationSpec extends Specification {
         given:
         def ledger = new TestLedger()
         def a = ledger.openAccount(USD, '1000.00')
-        def b = ledger.openAccount(USD)
+        def b = ledger.openAccount(USD, null)
         def transfer = ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, b, '20.00')).transfer()
         def projector = new RiskFeatureProjector(ledger.dataSource)
 
@@ -43,18 +43,24 @@ class OutboxIntegrationSpec extends Specification {
     def "a rolled-back payment produces neither an event nor a feature"() {
         given:
         def ledger = new TestLedger()
-        def before = ledger.sql.firstRow('select count(*) c from risk_outbox').c
+        def a = ledger.openAccount(USD, '100.00')
+        def b = ledger.openAccount(USD, null)
+        def id = UUID.randomUUID()
 
         when:
         ledger.unitOfWork.execute { tx ->
-            def a = ledger.openAccount(USD, '100.00')
-            // Deliberately abort the open transaction. No transfer is committed by it.
+            def transfer = new dev.erencivril.ledger.domain.Transfer(id, dev.erencivril.ledger.domain.TransferKind.TRANSFER,
+                    a.id(), b.id(), new dev.erencivril.ledger.domain.Money(10G, USD),
+                    new dev.erencivril.ledger.domain.Money(10G, USD), null, java.time.Instant.now())
+            tx.transfers().insert(transfer)
+            assert ledger.sql.firstRow('select count(*) c from risk_outbox where transfer_id = ?', [id]).c == 0 // invisible outside tx
             throw new IllegalStateException('abort')
         }
 
         then:
         thrown(IllegalStateException)
-        ledger.sql.firstRow('select count(*) c from risk_outbox').c == before
+        ledger.sql.firstRow('select count(*) c from risk_outbox where transfer_id = ?', [id]).c == 0
+        ledger.sql.firstRow('select count(*) c from transfers where id = ?', [id]).c == 0
 
         cleanup:
         ledger?.close()
@@ -64,7 +70,7 @@ class OutboxIntegrationSpec extends Specification {
         given:
         def ledger = new TestLedger()
         def a = ledger.openAccount(USD, '1000.00')
-        def b = ledger.openAccount(USD)
+        def b = ledger.openAccount(USD, null)
         (1..20).each { ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, b, '2.00')) }
         def projector = new RiskFeatureProjector(ledger.dataSource)
 
@@ -86,7 +92,7 @@ class OutboxIntegrationSpec extends Specification {
         def ledger = new TestLedger()
         ledger.enableRisk(RiskHoldIntegrationSpec.RULES)
         def a = ledger.openAccount(USD, '1000.00')
-        def b = ledger.openAccount(USD)
+        def b = ledger.openAccount(USD, null)
         def held = ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, b, '150.00')).transfer()
 
         expect:
@@ -99,7 +105,7 @@ class OutboxIntegrationSpec extends Specification {
         ledger.sql.firstRow('select count(*) c from risk_outbox where transfer_id = ?', [held.id()]).c == 1
 
         when:
-        def otherPayee = ledger.openAccount(USD)
+        def otherPayee = ledger.openAccount(USD, null)
         def rejected = ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, otherPayee, '150.00')).transfer()
         ledger.holds.reject(rejected.id())
 
@@ -114,7 +120,7 @@ class OutboxIntegrationSpec extends Specification {
         given:
         def ledger = new TestLedger()
         def a = ledger.openAccount(USD, '1000.00')
-        def b = ledger.openAccount(USD)
+        def b = ledger.openAccount(USD, null)
         ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, b, '25.00'))
 
         when:
@@ -130,6 +136,67 @@ class OutboxIntegrationSpec extends Specification {
         ledger.unitOfWork.execute { tx -> tx.risk().payeeFacts(a.id(), b.id()).get().paidBefore() }
 
         cleanup:
+        ledger?.close()
+    }
+    def "a projection failure rolls back deduplication, aggregates and acknowledgement together"() {
+        given:
+        def ledger = new TestLedger()
+        def projector = new RiskFeatureProjector(ledger.dataSource)
+        while (projector.poll(100) > 0) { }
+        def a = ledger.openAccount(USD, '100.00')
+        def b = ledger.openAccount(USD, null)
+        def payment = ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, b, '10.00')).transfer()
+        // A temporary constraint makes the aggregate insert fail after the deduplication insert.
+        ledger.sql.execute("alter table risk_features_sender add constraint projection_fault check (sender_id <> '${a.id()}') not valid".toString())
+
+        when:
+        projector.poll(100)
+
+        then:
+        thrown(IllegalStateException)
+        ledger.sql.firstRow('select count(*) c from risk_features_payments where transfer_id = ?', [payment.id()]).c == 0
+        ledger.sql.firstRow('select processed_at from risk_outbox where transfer_id = ?', [payment.id()]).processed_at == null
+
+        when:
+        ledger.sql.execute('alter table risk_features_sender drop constraint projection_fault')
+        projector.poll(100)
+
+        then:
+        ledger.sql.firstRow('select payment_count from risk_features_sender where sender_id = ?', [a.id()]).payment_count == 1
+
+        cleanup:
+        ledger?.sql?.execute('alter table risk_features_sender drop constraint if exists projection_fault')
+        projector?.close()
+        ledger?.close()
+    }
+
+    def "a poller skips a locked pending row rather than waiting for it"() {
+        given:
+        def ledger = new TestLedger()
+        def projector = new RiskFeatureProjector(ledger.dataSource)
+        while (projector.poll(100) > 0) { }
+        def a = ledger.openAccount(USD, '100.00')
+        def b = ledger.openAccount(USD, null)
+        def payment = ledger.transfers.transfer(ledger.command(UUID.randomUUID().toString(), a, b, '10.00')).transfer()
+        def connection = ledger.dataSource.connection
+        connection.autoCommit = false
+        def statement = connection.prepareStatement('select id from risk_outbox where transfer_id = ? for update')
+        statement.setObject(1, payment.id())
+        statement.executeQuery().close()
+
+        expect:
+        projector.poll(100) == 0
+
+        when:
+        connection.rollback()
+
+        then:
+        projector.poll(100) == 1
+
+        cleanup:
+        statement?.close()
+        connection?.close()
+        projector?.close()
         ledger?.close()
     }
 }

@@ -14,4 +14,6 @@ Short notes on the choices that shape the code: what was decided, why, what it c
 | [0008](0008-risk-engine-in-the-domain.md) | The risk engine is pure domain code and its rules are versioned data |
 | [0009](0009-holds-use-a-hold-account.md) | A held transfer moves the money into a hold account |
 
+| [0010](0010-poll-the-transactional-outbox.md) | Poll a transactional outbox for risk features |
+
 Each file has the same sections: Status, Context, Decision, Consequences, Evidence.

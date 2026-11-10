@@ -3,15 +3,12 @@ package dev.erencivril.ledger.persistence;
 import static dev.erencivril.ledger.persistence.jooq.Tables.ACCOUNTS;
 import static dev.erencivril.ledger.persistence.jooq.Tables.RISK_DECISIONS;
 import static dev.erencivril.ledger.persistence.jooq.Tables.RISK_DECISION_HITS;
-import static dev.erencivril.ledger.persistence.jooq.Tables.TRANSFERS;
 
 import dev.erencivril.ledger.application.Ports.NewRiskDecision;
 import dev.erencivril.ledger.application.Ports.PayeeFacts;
 import dev.erencivril.ledger.application.Ports.RiskRepository;
 import dev.erencivril.ledger.application.Ports.SenderHistory;
 import dev.erencivril.ledger.domain.AccountKind;
-import dev.erencivril.ledger.domain.TransferKind;
-import dev.erencivril.ledger.domain.TransferStatus;
 import dev.erencivril.ledger.domain.risk.RiskAction;
 import dev.erencivril.ledger.domain.risk.RiskDecision;
 import dev.erencivril.ledger.domain.risk.RuleHit;
@@ -23,7 +20,6 @@ import java.util.Optional;
 import java.util.UUID;
 import org.jooq.DSLContext;
 import org.jooq.Record3;
-import org.jooq.impl.DSL;
 
 final class JooqRiskRepository implements RiskRepository {
 
@@ -45,24 +41,28 @@ final class JooqRiskRepository implements RiskRepository {
 
     /** Only a COMPLETED transfer makes a payee known: a held or rejected one has not proved anything yet. */
     private boolean paidBefore(UUID senderId, UUID payeeId) {
-        return dsl.fetchExists(DSL.selectOne()
-                .from(TRANSFERS)
-                .where(TRANSFERS.SOURCE_ACCOUNT_ID.eq(senderId))
-                .and(TRANSFERS.DESTINATION_ACCOUNT_ID.eq(payeeId))
-                .and(TRANSFERS.KIND.eq(TransferKind.TRANSFER.name()))
-                .and(TRANSFERS.STATUS.eq(TransferStatus.COMPLETED.name())));
+        return dsl.fetchOne("""
+                SELECT EXISTS(SELECT 1 FROM risk_features_payee WHERE sender_id = ? AND payee_id = ?)
+                    OR EXISTS(SELECT 1 FROM transfers WHERE source_account_id = ? AND destination_account_id = ?
+                        AND kind = 'TRANSFER' AND status = 'COMPLETED') AS known
+                """, senderId, payeeId, senderId, payeeId).get("known", Boolean.class);
     }
 
     @Override
     public SenderHistory senderHistory(UUID senderId, Instant since) {
-        var row = dsl.select(DSL.count(), DSL.avg(TRANSFERS.SOURCE_AMOUNT))
-                .from(TRANSFERS)
-                .where(TRANSFERS.SOURCE_ACCOUNT_ID.eq(senderId))
-                .and(TRANSFERS.KIND.eq(TransferKind.TRANSFER.name()))
-                .and(TRANSFERS.STATUS.eq(TransferStatus.COMPLETED.name()))
-                .and(TRANSFERS.CREATED_AT.ge(since.atOffset(ZoneOffset.UTC)))
-                .fetchOne();
-        return new SenderHistory(row.value1(), row.value2());
+        // Union the read model with not-yet-projected payments. One SQL snapshot, no double counting,
+        // and a stopped poller does not quietly erase the sender's payment history.
+        var row = dsl.fetchOne("""
+                SELECT count(*) AS n, avg(amount) AS average FROM (
+                    SELECT amount FROM risk_features_payments WHERE sender_id = ? AND completed_at >= CAST(? AS timestamptz)
+                    UNION ALL
+                    SELECT t.source_amount FROM transfers t WHERE t.source_account_id = ?
+                        AND t.kind = 'TRANSFER' AND t.status = 'COMPLETED'
+                        AND coalesce(t.resolved_at, t.created_at) >= CAST(? AS timestamptz)
+                        AND NOT EXISTS(SELECT 1 FROM risk_features_payments p WHERE p.transfer_id = t.id)
+                ) history
+                """, senderId, since.atOffset(ZoneOffset.UTC), senderId, since.atOffset(ZoneOffset.UTC));
+        return new SenderHistory(row.get("n", Integer.class), row.get("average", java.math.BigDecimal.class));
     }
 
     @Override
