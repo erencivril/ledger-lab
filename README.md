@@ -138,6 +138,28 @@ Rules live in YAML, are loaded into PostgreSQL as a numbered version, and a publ
 
 The risk history has a small CQRS read model: `risk_features_payments`, `risk_features_sender`, and `risk_features_payee`. Completed payments append to a transactional outbox in PostgreSQL. A polling worker uses `FOR UPDATE SKIP LOCKED` and commits projection and acknowledgement together. Redelivery is idempotent by transfer id. Unprojected payments are included directly from the ledger when risk history is read, so a stopped poller does not hide recent payments. See [ADR 0010](docs/adr/0010-poll-the-transactional-outbox.md).
 
+### Synthetic back-test
+
+```sh
+./gradlew riskGenerate -Psamples=10000 -Pseed=42 -Poutput=build/synthetic.ndjson
+./gradlew riskBacktest -Psamples=10000 -Pseed=42 -Pk=100
+# Evaluate exactly the observations in a saved file instead:
+./gradlew riskBacktest -Pinput=build/synthetic.ndjson -Pk=100
+```
+
+These are invented, independent observations: normal payments plus injected scam-like and mule-like bursts. They are not a real transaction population, a graph reconstruction, ML, or a measured fraud rate. Labels and signal distributions are chosen by the generator. There is overlap: normal payments can look suspicious and harmful ones can be quiet. The same 10,000 observations are used for both rule sets, without fitting thresholds. CI uploads the output as `risk-backtest-jdk21` and `risk-backtest-jdk25`.
+
+Actual output with seed 42, 10,000 observations, k=100:
+
+| Version | TP | FP | TN | FN | Precision | Recall | Precision@100 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1396 | 1930 | 6045 | 629 | 0.4197 | 0.6894 | 0.9400 |
+| 2 | 1773 | 2064 | 5911 | 252 | 0.4621 | 0.8756 | 1.0000 |
+
+A positive prediction means STEP_UP, HOLD or BLOCK. WARN is not an intervention. TP is a labelled harmful payment caught, FP a normal one interrupted, TN a normal one left alone, FN a harmful one missed. Precision is `TP / (TP + FP)`; recall is `TP / (TP + FN)`. Precision@k is the harmful share of the first k observations in a review queue ranked by action severity, then number of triggered rules, then sample id for ties. There is no calibrated risk probability. Undefined ratios print `NaN`, and k is clamped to the dataset size.
+
+Version 2 catches more of the injected patterns, but also interrupts more normal payments. Its precision here is under 50%. The high precision@100 comes from the artificial distributions and ranking, not proof of quality on real payments. Changing the seed or the distributions changes these numbers.
+
 ## API
 
 Amounts are strings. Errors are always `{"code": "...", "message": "..."}`.

@@ -192,3 +192,21 @@ pitest {
     // Without this the worker would use the JDK that runs Gradle and could not load newer class files.
     jvmPath = javaToolchains.launcherFor(java.toolchain).map { it.executablePath }
 }
+
+// Reproducible heuristic evaluation on invented observations. No external services required.
+tasks.register('riskBacktest', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'dev.erencivril.ledger.risk.RiskCli'
+    javaLauncher = javaToolchains.launcherFor(java.toolchain)
+    if (findProperty('input')) {
+        args 'backtest-file', findProperty('input'), (findProperty('k') ?: '100')
+    } else {
+        args 'backtest', (findProperty('samples') ?: '10000'), (findProperty('seed') ?: '42'), (findProperty('k') ?: '100')
+    }
+}
+tasks.register('riskGenerate', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'dev.erencivril.ledger.risk.RiskCli'
+    javaLauncher = javaToolchains.launcherFor(java.toolchain)
+    args 'generate', (findProperty('samples') ?: '10000'), (findProperty('seed') ?: '42'), (findProperty('output') ?: 'build/synthetic.ndjson')
+}

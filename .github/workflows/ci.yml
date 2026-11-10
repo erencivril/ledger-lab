@@ -29,6 +29,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build and run unit specs
         run: ./gradlew assemble test -PjavaVersion=${{ matrix.java }} --console=plain
+      - name: Reproduce the synthetic backtest
+        run: |
+          ./gradlew riskBacktest -PjavaVersion=${{ matrix.java }} -Psamples=10000 -Pseed=42 --console=plain > build/risk-backtest.txt
+          cat build/risk-backtest.txt
+      - name: Upload synthetic backtest
+        uses: actions/upload-artifact@v4
+        with:
+          name: risk-backtest-jdk${{ matrix.java }}
+          path: build/risk-backtest.txt
       - name: Upload unit test report
         if: always()
         uses: actions/upload-artifact@v4

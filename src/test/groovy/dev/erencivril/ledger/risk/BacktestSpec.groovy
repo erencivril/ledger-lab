@@ -71,7 +71,7 @@ class BacktestSpec extends Specification {
         rows != SyntheticData.generate(1000, 43)
         rows.size() == 1000
         rows*.id().toSet().size() == 1000
-        rows*.pattern().toSet() == SyntheticData.Pattern.values().toSet()
+        rows*.pattern().toSet() == SyntheticData.Pattern.values().toList().toSet()
         rows.every { it.context().amountUsd() > 0 }
 
         when:
@@ -88,5 +88,19 @@ class BacktestSpec extends Specification {
         expect:
         Backtest.evaluate(new RiskEngine(1, [new FirstPaymentLargeRule(RiskAction.WARN, 1G)], 0, 0), [row], 1).fn() == 1
         Backtest.evaluate(new RiskEngine(1, [new FirstPaymentLargeRule(RiskAction.STEP_UP, 1G)], 0, 0), [row], 1).tp() == 1
+    }
+    def "saved synthetic observations round trip without adding derived money properties"() {
+        given:
+        def sample = SyntheticData.generate(1, 42)[0]
+        def json = RiskCli.jsonMapper()
+
+        when:
+        def text = json.writeValueAsString(sample)
+        def restored = json.readValue(text, SyntheticData.Sample)
+
+        then:
+        restored == sample
+        !text.contains('"zero"')
+        !text.contains('"positive"')
     }
 }
