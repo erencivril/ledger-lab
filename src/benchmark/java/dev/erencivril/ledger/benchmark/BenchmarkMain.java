@@ -169,45 +169,27 @@ public final class BenchmarkMain {
                 Pause.sleeping());
 
         long[] latenciesNanos = new long[operations.size()];
-        AtomicInteger next = new AtomicInteger();
         AtomicLong committed = new AtomicLong();
         AtomicLong insufficient = new AtomicLong();
         AtomicLong aborted = new AtomicLong();
         String runId = kind + "-" + System.nanoTime();
-        CountDownLatch startGate = new CountDownLatch(1);
-
-        List<Thread> workers = new ArrayList<>();
-        for (int t = 0; t < threads; t++) {
-            Thread worker = new Thread(() -> {
-                awaitQuietly(startGate);
-                int index;
-                while ((index = next.getAndIncrement()) < operations.size()) {
-                    Operation op = operations.get(index);
-                    TransferCommand command = new TransferCommand(
-                            runId + "-" + index,
-                            accounts.get(op.fromIndex()).id(),
-                            accounts.get(op.toIndex()).id(),
-                            new Money(op.amount(), Currency.USD));
-                    long started = System.nanoTime();
-                    try {
-                        service.transfer(command);
-                        committed.incrementAndGet();
-                    } catch (DomainException.InsufficientFunds e) {
-                        insufficient.incrementAndGet();
-                    } catch (ApplicationException.ConcurrentUpdate e) {
-                        aborted.incrementAndGet();
-                    }
-                    latenciesNanos[index] = System.nanoTime() - started;
-                }
-            });
-            workers.add(worker);
-            worker.start();
-        }
         long begin = System.nanoTime();
-        startGate.countDown();
-        for (Thread worker : workers) {
-            joinQuietly(worker);
-        }
+        runWorkers(operations.size(), threads, index -> {
+            Operation op = operations.get(index);
+            TransferCommand command = new TransferCommand(
+                    runId + "-" + index, accounts.get(op.fromIndex()).id(),
+                    accounts.get(op.toIndex()).id(), new Money(op.amount(), Currency.USD));
+            long started = System.nanoTime();
+            try {
+                service.transfer(command);
+                committed.incrementAndGet();
+            } catch (DomainException.InsufficientFunds e) {
+                insufficient.incrementAndGet();
+            } catch (ApplicationException.ConcurrentUpdate e) {
+                aborted.incrementAndGet();
+            }
+            latenciesNanos[index] = System.nanoTime() - started;
+        });
         double seconds = (System.nanoTime() - begin) / 1e9;
 
         List<String> violations = LedgerAuditReader.violations(dataSource);
@@ -224,6 +206,23 @@ public final class BenchmarkMain {
                 seconds,
                 percentile(latenciesNanos, 0.50) / 1e6,
                 percentile(latenciesNanos, 0.99) / 1e6);
+    }
+
+    static void runWorkers(int operations, int threads, java.util.function.IntConsumer operation) {
+        AtomicInteger next = new AtomicInteger();
+        CountDownLatch gate = new CountDownLatch(1);
+        List<Thread> workers = new ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            Thread worker = new Thread(() -> {
+                awaitQuietly(gate);
+                int index;
+                while ((index = next.getAndIncrement()) < operations) operation.accept(index);
+            });
+            workers.add(worker);
+            worker.start();
+        }
+        gate.countDown();
+        for (Thread worker : workers) joinQuietly(worker);
     }
 
     private static double percentile(long[] sorted, double fraction) {

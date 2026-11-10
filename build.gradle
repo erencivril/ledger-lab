@@ -34,6 +34,9 @@ ext {
     testcontainersVersion = '2.0.5'
 }
 
+sourceSets.integrationTest.compileClasspath += sourceSets.benchmark.output
+sourceSets.integrationTest.runtimeClasspath += sourceSets.benchmark.output + sourceSets.benchmark.runtimeClasspath
+
 configurations {
     integrationTestImplementation.extendsFrom testImplementation
     integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
