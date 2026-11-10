@@ -33,9 +33,9 @@ import java.util.UUID;
  * is waiting. A crash between step 1 and step 2 or 3 loses nothing: the money is in the hold account and
  * the PENDING row says why.
  *
- * <p>Holds always lock the one customer account they change with {@code SELECT ... FOR UPDATE}, whichever
- * lock strategy is configured for ordinary transfers. They are rare, and one lock on one row cannot
- * deadlock. Release and reject first lock the transfer row, so two people deciding on the same transfer
+ * <p>Placement locks both customer rows in the shared ascending UUID order, including the destination
+ * needed by the transfer foreign key. Release and reject change one customer and first lock the transfer
+ * row, so two people deciding on the same transfer
  * take turns, and the second one finds it no longer PENDING.
  */
 public final class HoldService {
@@ -52,12 +52,14 @@ public final class HoldService {
 
     /** Step 1, inside the caller's transaction: debit the sender into the hold account. */
     Posting place(LedgerTransaction tx, TransferCommand command, Instant now) {
-        Account source = tx.accounts()
-                .findForUpdate(command.sourceAccountId())
-                .orElseThrow(() -> new AccountNotFound(command.sourceAccountId()));
-        Account destination = tx.accounts()
-                .find(command.destinationAccountId())
-                .orElseThrow(() -> new AccountNotFound(command.destinationAccountId()));
+        // Transfer insertion takes FK key-share locks on BOTH accounts. Acquire both in the
+        // same order as ordinary strategies, even though only the source balance changes.
+        var locked = new java.util.HashMap<UUID, Account>();
+        for (UUID id : AccountOrder.ascending(command.sourceAccountId(), command.destinationAccountId())) {
+            tx.accounts().findForUpdate(id).ifPresent(account -> locked.put(id, account));
+        }
+        Account source = AccountOrder.requireFound(locked, command.sourceAccountId());
+        Account destination = AccountOrder.requireFound(locked, command.destinationAccountId());
 
         HoldPlan plan = planner.planHold(source, destination, command.amount());
         tx.accounts().updateBalance(source.id(), plan.sourceBalanceAfter());
