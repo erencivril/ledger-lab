@@ -12,15 +12,15 @@ class SmokeContractTest(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             accounts = 0
             payments = 0
-            def log_message(self, *args):
+            def log_message(self, format, *args):
                 pass
             def do_GET(self):
                 if self.path == '/health':
-                    self.reply(200, {'status': 'up' if fault == 'health' else 'ok', 'postgres': 'up', 'redis': 'up'})
+                    self.reply(200, {'status': 'degraded' if fault == 'health' else 'up', 'postgres': 'up', 'redis': 'up'})
                 elif '/statement' in self.path:
                     self.reply(200, {'entries': [] if fault == 'statement' else [
-                        {'transferId': 'payment', 'amount': '-25.00', 'currency': 'USD', 'balanceAfter': '75.00'},
-                        {'transferId': 'opening', 'amount': '100.00', 'currency': 'USD', 'balanceAfter': '100.00'}], 'nextCursor': None})
+                        {'transferId': 'payment', 'amount': {'amount': '-25.00', 'currency': 'USD'}, 'balanceAfter': {'amount': '75.00', 'currency': 'USD'}},
+                        {'transferId': 'opening', 'amount': {'amount': '100.00', 'currency': 'USD'}, 'balanceAfter': {'amount': '100.00', 'currency': 'USD'}}], 'nextCursor': None})
                 else:
                     sender = self.path.endswith('/sender')
                     self.reply(200, {'id': 'sender' if sender else 'receiver',

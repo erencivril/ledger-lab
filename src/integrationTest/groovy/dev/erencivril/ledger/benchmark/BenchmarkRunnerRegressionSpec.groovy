@@ -1,8 +1,6 @@
 package dev.erencivril.ledger.benchmark
 
 import spock.lang.Specification
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.IntConsumer
 
 class BenchmarkRunnerRegressionSpec extends Specification {

@@ -191,6 +191,9 @@ public final class BenchmarkMain {
             latenciesNanos[index] = System.nanoTime() - started;
         });
         double seconds = (System.nanoTime() - begin) / 1e9;
+        if (committed.get() + insufficient.get() + aborted.get() != operations.size()) {
+            throw new IllegalStateException("Benchmark outcome count does not match requested operations");
+        }
 
         List<String> violations = LedgerAuditReader.violations(dataSource);
         if (!violations.isEmpty()) {
@@ -211,18 +214,35 @@ public final class BenchmarkMain {
     static void runWorkers(int operations, int threads, java.util.function.IntConsumer operation) {
         AtomicInteger next = new AtomicInteger();
         CountDownLatch gate = new CountDownLatch(1);
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        AtomicInteger processed = new AtomicInteger();
         List<Thread> workers = new ArrayList<>();
         for (int t = 0; t < threads; t++) {
             Thread worker = new Thread(() -> {
-                awaitQuietly(gate);
-                int index;
-                while ((index = next.getAndIncrement()) < operations) operation.accept(index);
+                try {
+                    gate.await();
+                    int index;
+                    while (failure.get() == null && (index = next.getAndIncrement()) < operations) {
+                        operation.accept(index);
+                        processed.incrementAndGet();
+                    }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                }
             });
             workers.add(worker);
             worker.start();
         }
         gate.countDown();
-        for (Thread worker : workers) joinQuietly(worker);
+        try {
+            for (Thread worker : workers) worker.join();
+        } catch (InterruptedException e) {
+            workers.forEach(Thread::interrupt);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Benchmark interrupted", e);
+        }
+        if (failure.get() != null) throw new IllegalStateException("Benchmark worker failed", failure.get());
+        if (processed.get() != operations) throw new IllegalStateException("Incomplete benchmark workload");
     }
 
     private static double percentile(long[] sorted, double fraction) {
@@ -240,19 +260,4 @@ public final class BenchmarkMain {
         return accounts;
     }
 
-    private static void awaitQuietly(CountDownLatch latch) {
-        try {
-            latch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static void joinQuietly(Thread thread) {
-        try {
-            thread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
 }

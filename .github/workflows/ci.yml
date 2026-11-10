@@ -119,6 +119,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and start app, PostgreSQL and Redis
         run: docker compose up --build -d --wait
+      - name: Smoke assertion controls
+        run: python3 scripts/test_smoke.py
       - name: Smoke test
         run: ./scripts/smoke.sh http://localhost:8080
       - name: Compose logs
