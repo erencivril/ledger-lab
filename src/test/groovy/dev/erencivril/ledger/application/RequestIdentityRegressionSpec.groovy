@@ -25,6 +25,20 @@ class RequestIdentityRegressionSpec extends Specification {
         'ALICE'| 'Alice'
     }
 
+    def "command rejects malformed UTF-16 before it can be fingerprinted"() {
+        when:
+        new TransferService.TransferCommand('key', from, to,
+                new Money(1G, Currency.USD), false, name)
+
+        then:
+        def error = thrown(dev.erencivril.ledger.domain.DomainException)
+        error.code() == 'invalid_text'
+
+        where:
+        name << [String.valueOf((char) 0xd800), String.valueOf((char) 0xdc00),
+                 'Alice' + (char) 0xd800 + 'Smith', 'Alice' + (char) 0xdc00 + 'Smith']
+    }
+
     def "equivalent decimal amounts replay with identical names and confirmation"() {
         expect:
         fingerprint('A:|', true, '1') == fingerprint('A:|', true, '1.000')
