@@ -47,7 +47,7 @@ public final class TransferPlanner {
         return build(source, destination, amount, source.debitWithoutFundsCheck(amount));
     }
 
-    private static void validate(Account source, Account destination, Money amount) {
+    public static void validate(Account source, Account destination, Money amount) {
         if (source.id().equals(destination.id())) {
             throw new DomainException.SameAccount(source.id());
         }

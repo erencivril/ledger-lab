@@ -15,6 +15,18 @@ import redis.clients.jedis.JedisPooled;
 public final class RedisRiskVelocity implements RiskVelocity {
     private final JedisPooled pool;
     private static final String SCRIPT = """
+        local amount = tonumber(ARGV[2])
+        if not string.match(ARGV[2], '^%d+$') or not amount or amount <= 0 or amount > 9000000000000000 then
+            return redis.error_reply('invalid amount')
+        end
+        -- Validate retained members before ANY writes: Lua errors do not roll back writes.
+        local existing = redis.call('ZRANGE', KEYS[1], 0, -1)
+        for _, member in ipairs(existing) do
+            local cents = tonumber(string.match(member, '|(%d+)$'))
+            if not cents or cents <= 0 or cents > 9000000000000000 then
+                return redis.error_reply('invalid stored amount')
+            end
+        end
         local time = redis.call('TIME')
         local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
         redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 86400000)
@@ -37,7 +49,11 @@ public final class RedisRiskVelocity implements RiskVelocity {
     @Override
     public VelocitySnapshot record(UUID senderId, BigDecimal amountUsd) {
         try {
-            String cents = amountUsd.movePointRight(2).toBigIntegerExact().toString();
+            var integerCents = amountUsd.movePointRight(2).toBigIntegerExact();
+            if (integerCents.signum() <= 0 || integerCents.compareTo(new java.math.BigInteger("9000000000000000")) > 0) {
+                return VelocitySnapshot.unavailable();
+            }
+            String cents = integerCents.toString();
             List<?> result = (List<?>) pool.eval(SCRIPT, List.of("risk:velocity:" + senderId),
                     List.of(UUID.randomUUID().toString(), cents));
             return new VelocitySnapshot(true, ((Number) result.get(0)).intValue(),

@@ -41,6 +41,8 @@ class TransferServiceSpec extends Specification {
 
     def setup() {
         unitOfWork.execute(_) >> { Function f -> f.apply(tx) }
+        accounts.find(from.id()) >> Optional.of(from)
+        accounts.find(to.id()) >> Optional.of(to)
     }
 
     static Money usd(String amount) { new Money(new BigDecimal(amount), USD) }
@@ -121,6 +123,7 @@ class TransferServiceSpec extends Specification {
         given:
         def low = new Account(UUID.fromString('00000000-0000-0000-0000-000000000001'), 'o', USD, AccountKind.CUSTOMER, usd('50.00'), Instant.EPOCH)
         def high = new Account(UUID.fromString('ffffffff-0000-0000-0000-000000000001'), 'o', USD, AccountKind.CUSTOMER, usd('50.00'), Instant.EPOCH)
+        4 * accounts.find(_) >> { UUID id -> Optional.of(id == low.id() ? low : high) }
         def lockOrder = []
         accounts.findForUpdate(_) >> { UUID id -> lockOrder << id; Optional.of(id == low.id() ? low : high) }
         cache.get(_) >> Optional.empty()
@@ -183,9 +186,9 @@ class TransferServiceSpec extends Specification {
         then:
         1 * cache.get(_) >> Optional.empty()
         1 * idempotency.find(_) >> Optional.empty()
-        1 * limiter.acquire(_)
-        1 * idempotency.tryClaim(_, _) >> true
-        2 * accounts.findForUpdate(_) >> Optional.empty()
+        0 * limiter.acquire(_)
+        0 * idempotency.tryClaim(_, _)
+        1 * accounts.find(from.id()) >> Optional.empty()
         def e = thrown(ApplicationException.AccountNotFound)
         e.message.contains(from.id().toString())
         0 * transfers.insert(_)

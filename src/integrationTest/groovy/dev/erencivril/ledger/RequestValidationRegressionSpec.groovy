@@ -53,7 +53,7 @@ class RequestValidationRegressionSpec extends Specification {
 
         where:
         owner          | name
-        'Evil Corp'    | 'Evil Corp'
+        'Synthetic Blocked Entity' | 'Synthetic Blocked Entity'
         'ordinary'     | 'different name'
     }
 

@@ -153,6 +153,16 @@ public final class TransferService {
             return replay.get();
         }
 
+        // Account identity/currency/kind are immutable. Check before Redis or audit writes;
+        // balances and all planner rules are checked again inside the money transaction.
+        unitOfWork.execute(tx -> {
+            var source = tx.accounts().find(command.sourceAccountId())
+                    .orElseThrow(() -> new ApplicationException.AccountNotFound(command.sourceAccountId()));
+            var destination = tx.accounts().find(command.destinationAccountId())
+                    .orElseThrow(() -> new ApplicationException.AccountNotFound(command.destinationAccountId()));
+            dev.erencivril.ledger.domain.TransferPlanner.validate(source, destination, command.amount());
+            return null;
+        });
         velocityLimiter.acquire(command.sourceAccountId());
 
         RiskAssessment assessment = risk.assess(command).orElse(null);
